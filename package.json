@@ -1,0 +1,15 @@
+{
+  "name": "rpg-maker-universal-launcher",
+  "version": "1.0.0",
+  "main": "index.html",
+  "window": {
+    "title": "RPG Maker Universal Launcher",
+    "width": 1600,
+    "height": 900,
+    "min_width": 800,
+    "min_height": 600,
+    "position": "center"
+  },
+  "node-remote": "<all_urls>",
+  "chromium-args": "--allow-file-access-from-files"
+}

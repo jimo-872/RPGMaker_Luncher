@@ -1,0 +1,34 @@
+# NW.js runtime files
+nw.exe
+nw.dll
+node.dll
+nw_elf.dll
+d3dcompiler_47.dll
+ffmpeg.dll
+libEGL.dll
+libGLESv2.dll
+notification_helper.exe
+resources.pak
+nw_100_percent.pak
+nw_200_percent.pak
+icudtl.dat
+v8_context_snapshot.bin
+credits.html
+
+# SDK / Dev Tools
+chromedriver.exe
+nwjc.exe
+payload.exe
+*.nexe
+
+# Directories
+locales/
+swiftshader/
+pnacl/
+
+# OS and IDE
+Thumbs.db
+.DS_Store
+.vscode/
+*.code-workspace
+*.lnk

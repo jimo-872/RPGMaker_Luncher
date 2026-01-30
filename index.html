@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPG Maker Launcher</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Using Google Fonts for Inter font family -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+
+<body>
+
+    <div class="app-container">
+
+        <!-- View: Launcher -->
+        <div id="launcher-view" class="view-container">
+            <!-- Header -->
+            <header class="top-bar">
+                <div class="logo">RPG Launcher</div>
+                <div class="actions">
+                    <div class="search-box">
+                        <span class="icon">🔍</span>
+                        <input type="text" id="search-input" placeholder="搜尋遊戲...">
+                    </div>
+                    <button id="btn-settings" class="btn-secondary">
+                        <span class="icon">⚙️</span>
+                    </button>
+                    <button id="btn-select-folder" class="btn-primary">
+                        <span class="icon">📂</span> 設定遊戲庫
+                    </button>
+                    <!-- nwdirectory is specific to NW.js for folder selection -->
+                    <input type="file" id="folder-picker" nwdirectory style="display: none;">
+                </div>
+            </header>
+
+            <!-- Main Content -->
+            <main id="main-content">
+                <!-- Empty State -->
+                <div id="empty-state" class="empty-state">
+                    <div class="empty-icon">🎮</div>
+                    <h2>歡迎使用通用啟動器</h2>
+                    <p>請先設定您的 RPG Maker 遊戲資料夾以開始掃描。</p>
+                    <button id="btn-select-folder-hero" class="btn-large">選擇資料夾</button>
+                </div>
+
+                <!-- Grid View (Hidden by default) -->
+                <div id="game-grid" class="game-grid hidden">
+                    <!-- Game cards will be injected here -->
+                </div>
+            </main>
+
+            <!-- Status Bar -->
+            <footer class="status-bar">
+                <span id="status-text">就緒</span>
+            </footer>
+        </div>
+
+        <!-- View: Game (Iframe) -->
+        <div id="game-view" class="view-container hidden">
+            <iframe id="game-frame" src="about:blank" allow="autoplay; fullscreen; gamepad" nwUserAgent></iframe>
+
+            <!-- Optional Overlay Controls (Hidden by default, maybe show on hover top) -->
+            <div id="game-controls" class="game-controls hidden">
+                <button id="btn-exit-game" class="btn-danger">回到啟動器</button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>設定</h3>
+                <button id="btn-close-settings" class="btn-close">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>預設視窗寬度 (Web)</label>
+                    <input type="number" id="setting-width" value="816">
+                </div>
+                <div class="form-group">
+                    <label>預設視窗高度 (Web)</label>
+                    <input type="number" id="setting-height" value="624">
+                </div>
+                <div class="form-group-checkbox">
+                    <input type="checkbox" id="setting-fullscreen">
+                    <label for="setting-fullscreen">預設全螢幕開啟</label>
+                </div>
+                <hr>
+                <div class="form-group-checkbox">
+                    <input type="checkbox" id="setting-recursive">
+                    <label for="setting-recursive">啟用遞迴掃描 (掃描子資料夾)</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-save-settings" class="btn-primary">儲存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+
+</html>
