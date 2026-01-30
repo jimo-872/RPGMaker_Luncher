@@ -176,41 +176,68 @@ function showEmptyState() {
 async function loadLibrary(rootPath) {
     emptyState.classList.add('hidden');
     gameGrid.classList.remove('hidden');
-    gameGrid.innerHTML = '';
-    statusText.innerText = `正在掃描: ${rootPath}`;
 
-    try {
-        let gameCount = 0;
+    // 1. Try Load from Cache
+    const cacheKey = `rpg_cache_${rootPath}`;
+    const cachedData = localStorage.getItem(cacheKey);
 
-        if (appSettings.recursiveScan) {
-            gameCount = await scanRecursively(rootPath, 3);
-        } else {
-            const items = await fs.promises.readdir(rootPath, { withFileTypes: true });
-            const gameFolders = items.filter(dirent => dirent.isDirectory());
-
-            for (const dir of gameFolders) {
-                const fullPath = path.join(rootPath, dir.name);
-                const added = await checkAndAddGame(fullPath, dir.name);
-                if (added) gameCount++;
-            }
+    if (cachedData) {
+        try {
+            const games = JSON.parse(cachedData);
+            console.log(`[Cache] Loaded ${games.length} games from cache.`);
+            renderGameList(games);
+            statusText.innerText = `已載入快取 (${games.length} 個遊戲). 正在背景掃描...`;
+        } catch (e) {
+            console.error("Cache parse error", e);
+            gameGrid.innerHTML = '';
         }
+    } else {
+        gameGrid.innerHTML = '';
+        statusText.innerText = `正在掃描: ${rootPath}`;
+    }
 
-        if (gameCount === 0) {
+    // 2. Background Scan
+    try {
+        const games = await scanLibrary(rootPath);
+
+        // 3. Update UI & Cache
+        renderGameList(games);
+        localStorage.setItem(cacheKey, JSON.stringify(games));
+
+        if (games.length === 0) {
             statusText.innerText = `掃描完成。在 ${rootPath} 中未發現遊戲。`;
         } else {
-            statusText.innerText = `掃描完成。共發現 ${gameCount} 個遊戲。`;
+            statusText.innerText = `掃描完成。共發現 ${games.length} 個遊戲。`;
         }
 
     } catch (err) {
         console.error(err);
         statusText.innerText = `錯誤: ${err.message}`;
-        showEmptyState();
+        if (!cachedData) showEmptyState();
     }
 }
 
+async function scanLibrary(rootPath) {
+    let games = [];
+
+    if (appSettings.recursiveScan) {
+        games = await scanRecursively(rootPath, 3);
+    } else {
+        const items = await fs.promises.readdir(rootPath, { withFileTypes: true });
+        const gameFolders = items.filter(dirent => dirent.isDirectory());
+
+        for (const dir of gameFolders) {
+            const fullPath = path.join(rootPath, dir.name);
+            const metadata = await getGameMetadata(fullPath, dir.name);
+            if (metadata) games.push(metadata);
+        }
+    }
+    return games;
+}
+
 async function scanRecursively(currentPath, depth) {
-    if (depth <= 0) return 0;
-    let count = 0;
+    if (depth <= 0) return [];
+    let games = [];
 
     try {
         const items = await fs.promises.readdir(currentPath, { withFileTypes: true });
@@ -218,21 +245,21 @@ async function scanRecursively(currentPath, depth) {
         for (const dirent of items) {
             if (dirent.isDirectory()) {
                 const fullPath = path.join(currentPath, dirent.name);
-                const isGame = await checkAndAddGame(fullPath, dirent.name);
+                const metadata = await getGameMetadata(fullPath, dirent.name);
 
-                if (isGame) {
-                    count++;
+                if (metadata) {
+                    games.push(metadata);
                 } else {
-                    count += await scanRecursively(fullPath, depth - 1);
+                    const subGames = await scanRecursively(fullPath, depth - 1);
+                    games = games.concat(subGames);
                 }
             }
         }
     } catch (e) { }
-    return count;
+    return games;
 }
 
-
-async function checkAndAddGame(folderPath, folderName) {
+async function getGameMetadata(folderPath, folderName) {
     let entryPoint = null;
     let type = 'unknown';
 
@@ -245,8 +272,13 @@ async function checkAndAddGame(folderPath, folderName) {
         entryPoint = 'www/index.html';
         type = 'web';
     }
-
-    if (!entryPoint) return false;
+    /*     // 2. Check for Legacy EXE (Optional, can be removed if not needed)
+        else if (fs.existsSync(path.join(folderPath, 'Game.exe'))) {
+            entryPoint = 'Game.exe';
+            type = 'exe';
+        }
+     */
+    if (!entryPoint) return null;
 
     let title = null;
     let iconPath = null;
@@ -317,11 +349,20 @@ async function checkAndAddGame(folderPath, folderName) {
         }
     }
 
-    createGameCard(title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim);
-    return true;
+    return { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim };
 }
 
-function createGameCard(title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim) {
+function renderGameList(games) {
+    gameGrid.innerHTML = '';
+    games.sort((a, b) => a.title.localeCompare(b.title));
+
+    games.forEach(game => {
+        createGameCard(game);
+    });
+}
+
+function createGameCard(game) {
+    const { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim } = game;
     const card = document.createElement('div');
     card.className = 'game-card';
     card.setAttribute('data-title', title); // For Search
@@ -503,12 +544,36 @@ function injectGamePatches(folderPath) {
                 }
             };
             
-            // Patch NW.js App Quit
+            // 1. Patch window.close (Standard DOM)
+            window.close = function() {
+                console.log("Intercepted window.close");
+                returnToLauncher();
+            };
+
+            // 2. Patch NW.js App Quit
             if (typeof nw !== 'undefined' && nw.App) {
                 nw.App.quit = returnToLauncher;
             }
             
-            // Patch Process Exit
+            // 3. Patch NW.js Window Close
+            if (typeof nw !== 'undefined' && nw.Window) {
+                const origGet = nw.Window.get;
+                nw.Window.get = function() {
+                    const winInstance = origGet.apply(this, arguments);
+                    if (winInstance) {
+                         // Intercept close on the window instance
+                         winInstance.close = function(force) {
+                             console.log("Intercepted nw.Window.close");
+                             returnToLauncher();
+                         };
+                         // Intercept hide? Some games hide instead of close
+                         // winInstance.hide = returnToLauncher; 
+                    }
+                    return winInstance;
+                };
+            }
+
+            // 4. Patch Process Exit
             if (typeof process !== 'undefined') {
                 process.exit = function() {
                     console.log("Intercepted process.exit");
@@ -516,7 +581,7 @@ function injectGamePatches(folderPath) {
                 };
             }
 
-            // Patch SceneManager
+            // 5. Patch SceneManager (RPG Maker specific)
             if (typeof SceneManager !== 'undefined') {
                 SceneManager.terminate = returnToLauncher;
                 SceneManager.exit = returnToLauncher;
