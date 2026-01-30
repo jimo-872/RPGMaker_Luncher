@@ -337,7 +337,11 @@ async function getGameMetadata(folderPath, folderName) {
     }
 
     // 3. Fallback
-    if (!title) title = folderName;
+    if (!title) {
+        title = folderName;
+        // Filter out [RJ12345678] pattern (DLsite codes)
+        title = title.replace(/\[RJ\d+\]/gi, '').trim();
+    }
 
     // Try finding icon 
     const possibleIcons = [
