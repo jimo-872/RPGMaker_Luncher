@@ -34,7 +34,8 @@ const emptyState = document.getElementById('empty-state');
 const gameGrid = document.getElementById('game-grid');
 const statusText = document.getElementById('status-text');
 
-const searchInput = document.getElementById('search-input'); // New
+const searchInput = document.getElementById('search-input');
+const filterSlim = document.getElementById('filter-slim');
 
 const btnSettings = document.getElementById('btn-settings');
 const btnCloseSettings = document.getElementById('btn-close-settings');
@@ -54,22 +55,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-// --- Search Logic ---
-searchInput.addEventListener('input', (e) => {
-    const query = e.target.value.toLowerCase().trim();
+// --- Filter Logic ---
+function applyFilters() {
+    const query = searchInput.value.toLowerCase().trim();
+    const filterType = filterSlim.value; // 'all', 'slim', 'full'
     const cards = document.querySelectorAll('.game-card');
 
     cards.forEach(card => {
         const title = card.getAttribute('data-title').toLowerCase();
         const folder = card.getAttribute('data-folder').toLowerCase();
+        const isSlim = card.getAttribute('data-slim') === 'true';
 
-        if (title.includes(query) || folder.includes(query)) {
+        // 1. Text Match
+        const matchText = title.includes(query) || folder.includes(query);
+
+        // 2. Type Match
+        let matchType = true;
+        if (filterType === 'slim' && !isSlim) matchType = false;
+        if (filterType === 'full' && isSlim) matchType = false;
+
+        if (matchText && matchType) {
             card.classList.remove('hidden');
         } else {
             card.classList.add('hidden');
         }
     });
-});
+}
+
+searchInput.addEventListener('input', applyFilters);
+filterSlim.addEventListener('change', applyFilters);
 
 // --- View Management ---
 function showLauncherView() {
@@ -367,6 +381,7 @@ function createGameCard(game) {
     card.className = 'game-card';
     card.setAttribute('data-title', title); // For Search
     card.setAttribute('data-folder', path.basename(folderPath)); // For Search
+    card.setAttribute('data-slim', isSlim); // For Filter
 
     const cssIconPath = iconPath ? iconPath.replace(/\\/g, '/') : null;
 
