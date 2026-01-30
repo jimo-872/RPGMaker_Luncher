@@ -343,6 +343,13 @@ async function getGameMetadata(folderPath, folderName) {
         title = title.replace(/\[RJ\d+\]/gi, '').trim();
     }
 
+    // Extract RJ Code for context menu (from folderName)
+    let rjCode = null;
+    const rjMatch = folderName.match(/(RJ\d+)/i);
+    if (rjMatch) {
+        rjCode = rjMatch[1].toUpperCase();
+    }
+
     // Try finding icon 
     const possibleIcons = [
         path.join(folderPath, 'icon.png'),
@@ -367,7 +374,7 @@ async function getGameMetadata(folderPath, folderName) {
         }
     }
 
-    return { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim };
+    return { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim, rjCode };
 }
 
 function renderGameList(games) {
@@ -380,7 +387,7 @@ function renderGameList(games) {
 }
 
 function createGameCard(game) {
-    const { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim } = game;
+    const { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim, rjCode } = game;
     const card = document.createElement('div');
     card.className = 'game-card';
     card.setAttribute('data-title', title); // For Search
@@ -429,6 +436,15 @@ function createGameCard(game) {
         e.preventDefault();
         const menu = new nw.Menu();
         menu.append(new nw.MenuItem({ label: '開啟資料夾', click: () => nw.Shell.openItem(folderPath) }));
+
+        // Add DLsite link if RJ code exists
+        if (rjCode) {
+            menu.append(new nw.MenuItem({
+                label: `開啟 DLsite (${rjCode})`,
+                click: () => nw.Shell.openExternal(`https://www.dlsite.com/maniax/work/=/product_id/${rjCode}.html`)
+            }));
+        }
+
         menu.append(new nw.MenuItem({ type: 'separator' }));
         menu.append(new nw.MenuItem({ label: '瘦身 (移除 NW.js 執行檔)', click: () => confirmAndCleanGame(folderPath, title) }));
         menu.popup(e.x, e.y);
