@@ -11,5 +11,8 @@
     "position": "center"
   },
   "node-remote": "<all_urls>",
-  "chromium-args": "--allow-file-access-from-files"
+  "chromium-args": "--allow-file-access-from-files",
+  "dependencies": {
+    "fs-extra": "^11.3.3"
+  }
 }

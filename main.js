@@ -108,6 +108,26 @@ function showLauncherView() {
     document.title = "RPG Maker Universal Launcher";
 }
 
+/* // --- Global Context Menu (Reload) ---
+document.addEventListener('contextmenu', (e) => {
+    // Only show if clicking on blank areas or header, not inside game frame (which has its own logic usually)
+    // But game frame is in a separate view.
+    if (e.target.closest('.game-card') || e.target.closest('input') || e.target.closest('select')) return;
+
+    e.preventDefault();
+    const menu = new nw.Menu();
+    menu.append(new nw.MenuItem({
+        label: '重新載入啟動器',
+        click: () => chrome.runtime.reload()
+    }));
+    menu.append(new nw.MenuItem({
+        label: '開啟開發者工具',
+        click: () => nw.Window.get().showDevTools()
+    }));
+
+    menu.popup(e.x, e.y);
+});
+ */
 function showGameView(url, width, height, fullscreen) {
     launcherView.classList.add('hidden');
     gameView.classList.remove('hidden');
@@ -274,17 +294,51 @@ async function scanRecursively(currentPath, depth) {
 }
 
 async function getGameMetadata(folderPath, folderName) {
+    // 0. Filter out common non-game folders
+    // 'app', 'resources', 'www': Prevent detecting internal game structures as separate games
+    const ignoreList = ['manual', 'help', 'readme', 'documentation', 'css', 'js', 'fonts', 'images', 'img', 'audio', 'locales', 'app', 'resources', 'www', 'icon'];
+    if (ignoreList.includes(folderName.toLowerCase())) return null;
+
     let entryPoint = null;
     let type = 'unknown';
 
     // 1. Check for Web/MV/MZ
-    if (fs.existsSync(path.join(folderPath, 'index.html'))) {
-        entryPoint = 'index.html';
-        type = 'web';
+    // Stricter Check: Must have index.html AND (package.json OR js/ OR data/ OR www/)
+    const hasIndex = fs.existsSync(path.join(folderPath, 'index.html'));
+    const hasWwwIndex = fs.existsSync(path.join(folderPath, 'www', 'index.html'));
+
+    if (hasIndex) {
+        // 1. RPG Maker MV/MZ Check
+        if (fs.existsSync(path.join(folderPath, 'js', 'rpg_core.js')) ||
+            fs.existsSync(path.join(folderPath, 'js', 'rmmz_core.js'))) {
+            entryPoint = 'index.html';
+            type = 'web';
+        }
+        // 2. TyranoBuilder Check
+        else if (fs.existsSync(path.join(folderPath, 'tyrano'))) {
+            entryPoint = 'index.html';
+            type = 'tyrano';
+        }
+        // Also check for www folder structure (sometimes js is inside www)
+        else if (fs.existsSync(path.join(folderPath, 'www', 'js', 'rpg_core.js')) ||
+            fs.existsSync(path.join(folderPath, 'www', 'js', 'rmmz_core.js'))) {
+            entryPoint = 'index.html';
+            type = 'web';
+        }
     }
-    else if (fs.existsSync(path.join(folderPath, 'www', 'index.html'))) {
-        entryPoint = 'www/index.html';
-        type = 'web';
+
+    if (!entryPoint && hasWwwIndex) {
+        // Enforce core check for www structure too
+        if (fs.existsSync(path.join(folderPath, 'www', 'js', 'rpg_core.js')) ||
+            fs.existsSync(path.join(folderPath, 'www', 'js', 'rmmz_core.js'))) {
+            entryPoint = 'www/index.html';
+            type = 'web';
+        }
+        // Check Tyrano in www? (Unlikely but possible)
+        else if (fs.existsSync(path.join(folderPath, 'www', 'tyrano'))) {
+            entryPoint = 'www/index.html';
+            type = 'tyrano';
+        }
     }
     /*     // 2. Check for Legacy EXE (Optional, can be removed if not needed)
         else if (fs.existsSync(path.join(folderPath, 'Game.exe'))) {
@@ -298,7 +352,7 @@ async function getGameMetadata(folderPath, folderName) {
     let iconPath = null;
     let windowConfig = null;
 
-    // 1. Priority: System.json
+    // 1. Priority: System.json (RPG Maker) or Config.tjs (Tyrano)
     if (type === 'web') {
         try {
             const possibleSysPaths = [
@@ -319,6 +373,28 @@ async function getGameMetadata(folderPath, folderName) {
             }
         } catch (err) {
             console.warn('Failed to read System.json for', folderName, err);
+        }
+    } else if (type === 'tyrano') {
+        // Try parsing Config.tjs
+        try {
+            const possibleConfigPaths = [
+                path.join(folderPath, 'data', 'system', 'Config.tjs'),
+                path.join(folderPath, 'www', 'data', 'system', 'Config.tjs')
+            ];
+
+            for (const cfgPath of possibleConfigPaths) {
+                if (fs.existsSync(cfgPath)) {
+                    const content = fs.readFileSync(cfgPath, 'utf8');
+                    // Look for ;System.title = "Title";
+                    const match = content.match(/;System\.title\s*=\s*"(.*?)";/);
+                    if (match && match[1]) {
+                        title = match[1];
+                        break;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to read Config.tjs for', folderName, e);
         }
     }
 
@@ -369,7 +445,11 @@ async function getGameMetadata(folderPath, folderName) {
     if (type === 'web') {
         const hasNwExe = fs.existsSync(path.join(folderPath, 'nw.exe'));
         const hasGameExe = fs.existsSync(path.join(folderPath, 'Game.exe'));
-        if (!hasNwExe && !hasGameExe) {
+        const hasNwDll = fs.existsSync(path.join(folderPath, 'nw.dll'));
+
+        // If NO executables AND NO runtime dll, then it's slim
+        // If it has nw.dll, it's definitely NOT slim (even if exe is renamed)
+        if (!hasNwExe && !hasGameExe && !hasNwDll) {
             isSlim = true;
         }
     }
@@ -406,6 +486,9 @@ function createGameCard(game) {
     let badges = '';
     if (type === 'exe') {
         badges += '<div style="background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px; font-size:0.7rem; color:#aaa; margin-left:4px;">LEGACY</div>';
+    }
+    if (type === 'tyrano') {
+        badges += '<div style="background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px; font-size:0.7rem; color:#ff922b; margin-left:4px;">TYRANO</div>';
     }
     if (isSlim) {
         badges += '<div style="background:rgba(0,0,0,0.7); padding:2px 6px; border-radius:4px; font-size:0.7rem; color:#4dabf7; margin-left:4px;">SLIM</div>';
@@ -472,15 +555,30 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
     if (title) document.title = title;
     const fullEntryPath = path.join(folderPath, entryPoint);
 
-    if (type === 'web') {
-        // --- Web/MV/MZ Launch Strategy ---
+    if (type === 'web' || type === 'tyrano') {
+        // --- Web/MV/MZ/Tyrano Launch Strategy ---
 
-        // 1. Change CWD to game folder
+        // 1. Change CWD to game folder and Setup Module Path
         try {
+            // Save original CWD and Path
+            // Support game finding dependencies in Launcher's node_modules
+            const launcherNodeModules = path.join(path.dirname(process.execPath), 'node_modules'); // For packaged app
+            // Or current dev path
+            const devNodeModules = path.join(process.cwd(), 'node_modules');
+
+            let nodePathList = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
+            if (!nodePathList.includes(devNodeModules)) nodePathList.push(devNodeModules);
+            // process.env.NODE_PATH = nodePathList.join(path.delimiter);
+            // Actually, manipulating module.paths might be more effective for the current process, 
+            // but the iframe is a new context.
+            // NW.js inherits NODE_PATH.
+            process.env.NODE_PATH = nodePathList.join(path.delimiter);
+            require('module').Module._initPaths(); // Refresh paths
+
             process.chdir(folderPath);
             console.log('Changed CWD to:', folderPath);
         } catch (e) {
-            console.error('Failed to change CWD', e);
+            console.error('Failed to change CWD or setup paths', e);
         }
 
         // 2. Construct URL
@@ -499,14 +597,30 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
         }
 
         // 4. Switch to Game View
+        // Universal: Remove 'nwdisable' to ensure Node.js/NW.js access (needed for fs/saving)
+        gameFrame.removeAttribute('nwdisable');
+
+        // Isolation: Use 'nwfaketop' for Tyrano to prevent window.top conflicts
+        if (type === 'tyrano') {
+            gameFrame.setAttribute('nwfaketop', '');
+        } else {
+            gameFrame.removeAttribute('nwfaketop');
+        }
+
         showGameView(targetUrl, targetWidth, targetHeight, targetFullscreen);
 
-        // 5. Inject Patches once frame loads
-        // Remove old listener if exists? 
-        // We can just add a one-time listener.
-        gameFrame.onload = () => {
-            injectGamePatches(folderPath);
-        };
+        // 5. Inject Patches
+        // Only for RPG Maker (Web/MV/MZ)
+        if (type === 'web') {
+            gameFrame.onload = () => {
+                injectGamePatches(folderPath);
+            };
+        } else if (type === 'tyrano') {
+            console.log("Launching Tyrano: Activating Node.js Environment...");
+            gameFrame.onload = () => {
+                injectTyranoPatches(folderPath);
+            };
+        }
 
     } else if (type === 'exe') {
         // --- Legacy EXE Strategy ---
@@ -531,11 +645,11 @@ function injectGamePatches(folderPath) {
     const patchScript = `
         console.log("%c[Launcher] Injecting Single-Window Patches...", "color: cyan; font-weight: bold;");
 
-        // --- Save Path Patch ---
+        // --- Save Path Patch (RPG Maker Only) ---
         try {
             const targetPath = ${safePath};
             
-            // Force NW.js check
+            // Force NW.js check (RPG Maker logic)
             if (typeof Utils !== 'undefined') {
                 Utils.isNwjs = function() { return true; };
                 Utils.isOptionValid = function(name) { return name === 'test'; };
@@ -645,23 +759,140 @@ function injectGamePatches(folderPath) {
             }
         }, 500);
         setTimeout(() => clearInterval(refreshInterval), 10000);
+    `;
+
+    try {
+        win.eval(patchScript);
+
+        // --- Key Listener (F8/F12) - Injected directly to window object ---
+        win.addEventListener('keydown', (e) => {
+            if (e.key === 'F8' || e.key === 'F12') {
+                e.preventDefault();
+                e.stopPropagation();
+                if (window.parent && window.parent.openGameDevTools) {
+                    window.parent.openGameDevTools();
+                }
+            }
+        });
+
+    } catch (e) {
+        console.error("Failed to inject into iframe", e);
+    }
+}
+
+function injectTyranoPatches(folderPath) {
+    const win = gameFrame.contentWindow;
+    if (!win) return;
+
+    const patchScript = `
+        console.log("%c[Launcher] Injecting Tyrano Patches...", "color: pink; font-weight: bold;");
+
+        // --- Verify Node Access ---
+        if (typeof require !== 'undefined') {
+            console.log("[Launcher] Node.js is available inside Tyrano.");
+            try {
+                const fs = require('fs');
+                console.log("[Launcher] fs module check: OK");
+            } catch(e) {
+                console.warn("[Launcher] fs module check: Failed", e);
+            }
+        } else {
+            console.error("[Launcher] Node.js is MISSING! Config loading will fail.");
+        }
+
+        // --- Exit/Terminate Patch ---
+        try {
+            const returnToLauncher = function() {
+                console.log("[Launcher] Return to Launcher requested.");
+                if (window.parent && window.parent.showLauncherView) {
+                    window.parent.showLauncherView();
+                } else {
+                    console.error("Cannot find parent launcher window!");
+                }
+            };
+            
+            // 1. Patch window.close (Standard DOM)
+            window.close = function() {
+                console.log("Intercepted window.close");
+                returnToLauncher();
+            };
+
+            // 2. Patch NW.js App Quit
+            if (typeof nw !== 'undefined' && nw.App) {
+                nw.App.quit = returnToLauncher;
+            }
+            
+            // 3. Patch NW.js Window Close
+            if (typeof nw !== 'undefined' && nw.Window) {
+                const origGet = nw.Window.get;
+                nw.Window.get = function() {
+                    const winInstance = origGet.apply(this, arguments);
+                    if (winInstance) {
+                         winInstance.close = function(force) {
+                             console.log("Intercepted nw.Window.close");
+                             returnToLauncher();
+                         };
+                    }
+                    return winInstance;
+                };
+            }
+            
+            console.log("%c[Launcher] Tyrano Exit Patch Applied.", "color: lime;");
+
+        } catch(e) {
+            console.error("[Launcher] Tyrano Patch Failed:", e);
+        }
+
+        // --- Stack Overflow Protection (Recursion Guard) ---
+        // Tyrano games can recurse infinitely in synchronous tag loops (e.g. chara_face).
+        // We patch nextOrder to catch RangeError and schedule the next call asynchronously.
+        const addStackGuard = function() {
+             if (typeof tyrano !== 'undefined' && tyrano.plugin && tyrano.plugin.kag && tyrano.plugin.kag.ftag) {
+                 console.log("[Launcher] Installing Stack Overflow Guard...");
+                 const ftag = tyrano.plugin.kag.ftag;
+                 const origNextOrder = ftag.nextOrder;
+                 
+                 ftag.nextOrder = function() {
+                     try {
+                         origNextOrder.apply(this, arguments);
+                     } catch(e) {
+                         if (e.name === 'RangeError' || e.message.includes('stack')) {
+                             console.warn("%c[Launcher] Stack Overflow prevented! Rescheduling nextOrder...", "color: orange");
+                             setTimeout(() => { 
+                                 origNextOrder.apply(this, arguments); 
+                             }, 0);
+                         } else {
+                             console.error("[Launcher] Error in nextOrder:", e);
+                             throw e;
+                         }
+                     }
+                 };
+                 console.log("[Launcher] Guard Installed.");
+             } else {
+                 console.log("[Launcher] Tyrano object not ready, retrying...");
+                 setTimeout(addStackGuard, 1000);
+             }
+        };
+        addStackGuard();
+
+
 
         // --- Key Listener (F8/F12) ---
-        win.addEventListener('keydown', (e) => {
-             if (e.key === 'F8' || e.key === 'F12') {
-                 e.preventDefault();
-                 e.stopPropagation();
-                 if (window.parent && window.parent.openGameDevTools) {
-                     window.parent.openGameDevTools();
-                 }
-             }
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'F8' || e.key === 'F12') {
+                e.preventDefault();
+                e.stopPropagation();
+                if (window.parent && window.parent.openGameDevTools) {
+                    window.parent.openGameDevTools();
+                }
+            }
         });
     `;
 
     try {
         win.eval(patchScript);
     } catch (e) {
-        console.error("Failed to inject into iframe", e);
+        console.error("Failed to inject Tyrano patches", e);
     }
 }
 
@@ -669,9 +900,7 @@ function injectGamePatches(folderPath) {
 window.showLauncherView = showLauncherView;
 
 async function confirmAndCleanGame(folderPath, title) {
-    if (!confirm(`確定要對「${title}」進行瘦身嗎？\n\n這將會把 NW.js 執行檔 (如 .exe, .dll) 移至資源回收桶，僅保留遊戲數據。\n\n請確保該遊戲能透過此啟動器正常執行後再進行此操作。`)) {
-        return;
-    }
+    // Confirmation moved to after scanning logic to show specific file info
 
     const filesToRemove = [
         'nw.exe',
@@ -692,6 +921,25 @@ async function confirmAndCleanGame(folderPath, title) {
         'v8_context_snapshot.bin',
         'credits.html'
     ];
+
+    // Auto-detect other .exe files (Renamed game loaders)
+    try {
+        const rootFiles = fs.readdirSync(folderPath);
+        for (const file of rootFiles) {
+            if (file.toLowerCase().endsWith('.exe')) {
+                // Exclude Uninstallers
+                if (file.toLowerCase().startsWith('unins')) continue;
+                // Exclude Launcher specific tools? (none expected in game folder)
+
+                // Add to list if not already present
+                if (!filesToRemove.includes(file)) {
+                    filesToRemove.push(file);
+                }
+            }
+        }
+    } catch (e) {
+        console.warn("Autoscan for exe failed:", e);
+    }
 
     const foldersToRemove = [
         'locales',
