@@ -841,9 +841,19 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
             gameFrame.onload = () => {
                 try {
                     injectGamePatches(launchPath);
-                    // Expose game window for console debugging
-                    window.game = gameFrame.contentWindow;
-                    console.log("[Launcher] Game window exposed as 'window.game' for console access.");
+                    // Expose game window and common globals for console debugging
+                    const win = gameFrame.contentWindow;
+                    window.game = win;
+
+                    // Helpful shortcuts for console debugging
+                    ['$gameVariables', '$gameSwitches', '$gameParty', '$gameActors', '$gameSystem', '$dataScenario'].forEach(g => {
+                        Object.defineProperty(window, g, {
+                            get: () => win[g],
+                            configurable: true
+                        });
+                    });
+
+                    console.log("[Launcher] Game context exposed for console access.");
                 } catch (e) {
                     console.error("Patch Injection Failed:", e);
                 }
@@ -1765,39 +1775,46 @@ async function runBatchSlim(targets, isNetwork) {
 })();
 // --- Plugin Patcher (Nore_Tes Fix) ---
 function patchPluginsJs(folderPath) {
-    const pluginsPath = path.join(folderPath, 'www', 'js', 'plugins.js');
-    if (!fs.existsSync(pluginsPath)) return;
+    // 1. Detect multiple possible plugins.js locations (MV vs MZ)
+    const possiblePaths = [
+        path.join(folderPath, 'www', 'js', 'plugins.js'),
+        path.join(folderPath, 'js', 'plugins.js')
+    ];
+    let pluginsPath = null;
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+            pluginsPath = p;
+            break;
+        }
+    }
+
+    if (!pluginsPath) return;
 
     try {
         let content = fs.readFileSync(pluginsPath, 'utf8');
-        // Expected format: var $plugins = [...];
-        // Strip header/footer to get JSON
         const jsonStart = content.indexOf('[');
         const jsonEnd = content.lastIndexOf(']');
-
         if (jsonStart === -1 || jsonEnd === -1) return;
 
         const jsonStr = content.substring(jsonStart, jsonEnd + 1);
         const plugins = JSON.parse(jsonStr);
         let modified = false;
 
-        // Correct Scenario Path (Absolute + POSIX)
-        // Convert backslashes to forward slashes to match JS convention and avoid escaping issues
-        // e.g. "Y:/games/GameFolder/scenario/"
-        let scenarioAbsolutePath = path.join(folderPath, 'scenario').replace(/\\/g, '/');
-
-        // Ensure trailing slash
-        if (!scenarioAbsolutePath.endsWith('/')) scenarioAbsolutePath += '/';
+        // Determine if we need ./scenario/ or ../scenario/
+        // If plugins.js is in /js/, index.html is likely in root -> ./scenario/
+        // If plugins.js is in /www/js/, index.html is likely in /www/ -> ./scenario/ (relative to web context)
+        // Historically, many Nore_Tes implementations expect it relative to the game's base URL.
+        const scenarioRelativePath = "./scenario/";
 
         for (const plugin of plugins) {
             if (plugin.name === 'Nore_Tes' && plugin.status === true) {
                 if (plugin.parameters && plugin.parameters.scenarioFolder) {
                     const val = plugin.parameters.scenarioFolder;
 
-                    // Update if it doesn't match our calculated absolute path
-                    if (val !== scenarioAbsolutePath) {
-                        console.log(`[Launcher] Patching Nore_Tes scenarioFolder: ${val} -> ${scenarioAbsolutePath}`);
-                        plugin.parameters.scenarioFolder = scenarioAbsolutePath;
+                    // Update if it doesn't match our optimized relative path
+                    if (val !== scenarioRelativePath) {
+                        console.log(`[Launcher] Patching Nore_Tes (Relative): ${val} -> ${scenarioRelativePath}`);
+                        plugin.parameters.scenarioFolder = scenarioRelativePath;
                         modified = true;
                     }
                 }
@@ -1807,14 +1824,96 @@ function patchPluginsJs(folderPath) {
         if (modified) {
             const prefix = content.substring(0, jsonStart);
             const suffix = content.substring(jsonEnd + 1);
-
             const newJson = JSON.stringify(plugins, null, 4);
             const newContent = prefix + newJson + suffix;
-
             fs.writeFileSync(pluginsPath, newContent, 'utf8');
-            console.log("[Launcher] plugins.js patched successfully.");
+            console.log(`[Launcher] plugins.js patched at ${pluginsPath}`);
         }
 
+        // 2. Static Patch for Nore_Tes.js source code
+        const noreTesPaths = [
+            path.join(folderPath, 'www', 'js', 'plugins', 'Nore_Tes.js'),
+            path.join(folderPath, 'js', 'plugins', 'Nore_Tes.js')
+        ];
+        let noreTesPath = null;
+        for (const p of noreTesPaths) {
+            if (fs.existsSync(p)) {
+                noreTesPath = p;
+                break;
+            }
+        }
+
+        if (noreTesPath) {
+            try {
+                let scriptContent = fs.readFileSync(noreTesPath, 'utf8');
+                let scriptModified = false;
+
+                if (!scriptContent.includes('skipping write but continuing to load')) {
+                    const writeRegex = /if\s*\(self\._isJp\)\s*\{([\s\S]*?)fs\.writeFileSync\((Tes\.DATA_PATH\s*\+\s*'Scenario\.json')[\s\S]*?DataManager\.loadScenarioFile\('\$dataScenario'[\s\S]*?\}/;
+                    if (writeRegex.test(scriptContent)) {
+                        const safetyFix = `if (self._isJp) {
+                            if (Object.keys(scenario).length === 0) { 
+                                console.error('[Launcher] Nore_Tes: Scenario empty, skipping write but continuing to load.');
+                            } else {
+                                require('fs').writeFileSync($2, JSON.stringify(scenario));
+                            }
+                            DataManager.loadScenarioFile('$dataScenario', Tes.SCENARIO_FILE_NAME);
+                        }`;
+                        scriptContent = scriptContent.replace(writeRegex, safetyFix);
+                        scriptModified = true;
+                    }
+                }
+
+                // Patch 2: Path Resolution Stabilization
+                // Replace inconsistent relative paths with absolute paths based on process.cwd()
+                // Use a more aggressive regex to capture potential IIFE remnants or complex assignments
+                const pathReplacements = [
+                    {
+                        pattern: /var\s+SCENARIO_FOLDER_NAME\s*=\s*[^;]+;/g,
+                        replacement: "var SCENARIO_FOLDER_NAME = 'scenario';\n        window.$dataScenario = window.$dataScenario || null;"
+                    },
+                    {
+                        pattern: /Tes\.SCENARIO_SRC_PATH\s*=\s*(?:path\.join\([^;]+\)|function\(\)\s*\{[\s\S]*?\}\(\));?/g,
+                        replacement: "Tes.SCENARIO_SRC_PATH = path.join(process.cwd(), 'scenario/');"
+                    },
+                    {
+                        pattern: /Tes\.SCENARIO_SRC_PATH_EN\s*=\s*(?:path\.join\([^;]+\)|function\(\)\s*\{[\s\S]*?\}\(\));?/g,
+                        replacement: "Tes.SCENARIO_SRC_PATH_EN = path.join(process.cwd(), 'scenario_en/');"
+                    },
+                    {
+                        pattern: /Tes\.DATA_PATH\s*=\s*(?:path\.join\([^;]+\)|function\(\)\s*\{[\s\S]*?\}\(\));?/g,
+                        replacement: "Tes.DATA_PATH = path.join(process.cwd(), 'scenario/');"
+                    }
+                ];
+
+                // Patch 3: Load Strategy Optimization (Emergency Load)
+                if (!scriptContent.includes('EMERGENCY LOAD')) {
+                    const runRegex = /PluginManager\.registerCommand\(pluginName,\s*'Run',\s*function\s*\(args\)\s*\{([\s\S]*?)(var\s+list\s*=\s*\$dataScenario\[normalized\];)/;
+                    if (runRegex.test(scriptContent)) {
+                        const emergencyLoad = `PluginManager.registerCommand(pluginName, 'Run', function (args) {
+            $1// EMERGENCY LOAD
+            if (!window.$dataScenario && Utils.isNwjs()) {
+                try {
+                    const directPath = require('path').join(Tes.DATA_PATH, Tes.SCENARIO_FILE_NAME);
+                    if (require('fs').existsSync(directPath)) {
+                        window.$dataScenario = JSON.parse(require('fs').readFileSync(directPath, 'utf8'));
+                    }
+                } catch (e) {}
+            }
+            $2`;
+                        scriptContent = scriptContent.replace(runRegex, emergencyLoad);
+                        scriptModified = true;
+                    }
+                }
+
+                if (scriptModified) {
+                    fs.writeFileSync(noreTesPath, scriptContent, 'utf8');
+                    console.log(`[Launcher] Nore_Tes.js patched at ${noreTesPath}`);
+                }
+            } catch (noreErr) {
+                console.error("[Launcher] Failed to patch Nore_Tes.js", noreErr);
+            }
+        }
     } catch (e) {
         console.error("[Launcher] Failed to patch plugins.js", e);
     }
