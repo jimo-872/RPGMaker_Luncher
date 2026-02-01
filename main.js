@@ -10,6 +10,8 @@ let appSettings = {
     webFullscreen: false,
     recursiveScan: false
 };
+let isScanning = false;
+let pendingSlimTask = null;
 
 // Load saved settings
 const savedSettings = localStorage.getItem('app_settings');
@@ -36,6 +38,7 @@ const statusText = document.getElementById('status-text');
 
 const searchInput = document.getElementById('search-input');
 const filterSlim = document.getElementById('filter-slim');
+const filterEngine = document.getElementById('filter-engine');
 
 const btnSettings = document.getElementById('btn-settings');
 const btnCloseSettings = document.getElementById('btn-close-settings');
@@ -44,7 +47,17 @@ const settingsModal = document.getElementById('settings-modal');
 const inputWidth = document.getElementById('setting-width');
 const inputHeight = document.getElementById('setting-height');
 const inputFullscreen = document.getElementById('setting-fullscreen');
+
 const inputRecursive = document.getElementById('setting-recursive');
+
+const slimModal = document.getElementById('slim-modal');
+const btnCloseSlim = document.getElementById('btn-close-slim');
+const btnCancelSlim = document.getElementById('btn-cancel-slim');
+const btnConfirmSlim = document.getElementById('btn-confirm-slim');
+const slimTitle = document.getElementById('slim-title');
+const slimCount = document.getElementById('slim-count');
+const slimSize = document.getElementById('slim-size');
+const networkWarning = document.getElementById('network-warning');
 
 // --- Init ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -59,22 +72,28 @@ document.addEventListener('DOMContentLoaded', () => {
 function applyFilters() {
     const query = searchInput.value.toLowerCase().trim();
     const filterType = filterSlim.value; // 'all', 'slim', 'full'
+    const filterEng = filterEngine.value; // 'all', 'web', 'tyrano', 'exe'
     const cards = document.querySelectorAll('.game-card');
 
     cards.forEach(card => {
         const title = card.getAttribute('data-title').toLowerCase();
         const folder = card.getAttribute('data-folder').toLowerCase();
         const isSlim = card.getAttribute('data-slim') === 'true';
+        const engine = card.getAttribute('data-engine');
 
         // 1. Text Match
         const matchText = title.includes(query) || folder.includes(query);
 
-        // 2. Type Match
-        let matchType = true;
-        if (filterType === 'slim' && !isSlim) matchType = false;
-        if (filterType === 'full' && isSlim) matchType = false;
+        // 2. Type/Slim Match
+        let matchSlim = true;
+        if (filterType === 'slim' && !isSlim) matchSlim = false;
+        if (filterType === 'full' && isSlim) matchSlim = false;
 
-        if (matchText && matchType) {
+        // 3. Engine Match
+        let matchEngine = true;
+        if (filterEng !== 'all' && engine !== filterEng) matchEngine = false;
+
+        if (matchText && matchSlim && matchEngine) {
             card.classList.remove('hidden');
         } else {
             card.classList.add('hidden');
@@ -84,9 +103,11 @@ function applyFilters() {
 
 searchInput.addEventListener('input', applyFilters);
 filterSlim.addEventListener('change', applyFilters);
+filterEngine.addEventListener('change', applyFilters);
 
 // --- View Management ---
 function showLauncherView() {
+    document.body.classList.remove('in-game');
     gameView.classList.add('hidden');
     launcherView.classList.remove('hidden');
 
@@ -129,6 +150,13 @@ document.addEventListener('contextmenu', (e) => {
 });
  */
 function showGameView(url, width, height, fullscreen) {
+    // --- Start Game ---
+    // console.log(`Launching ${folderPath} (${type})`); // folderPath and type are not available here.
+
+    // UI Update: Enter Game Mode
+    document.body.classList.add('in-game');
+
+    // Hide Launcher, Show Game
     launcherView.classList.add('hidden');
     gameView.classList.remove('hidden');
 
@@ -231,6 +259,7 @@ async function loadLibrary(rootPath) {
     }
 
     // 2. Background Scan
+    isScanning = true;
     try {
         const games = await scanLibrary(rootPath);
 
@@ -248,6 +277,18 @@ async function loadLibrary(rootPath) {
         console.error(err);
         statusText.innerText = `錯誤: ${err.message}`;
         if (!cachedData) showEmptyState();
+    } finally {
+        isScanning = false;
+
+        // Execute Pending Task if any
+        if (pendingSlimTask) {
+            console.log("Executing pending slim task...", pendingSlimTask);
+            // Check if user closed the waiting modal? 
+            // In confirmAndCleanGame, we will just update the modal if it's open.
+            // But here we just call it.
+            confirmAndCleanGame(pendingSlimTask.folderPath, pendingSlimTask.title);
+            pendingSlimTask = null;
+        }
     }
 }
 
@@ -440,9 +481,9 @@ async function getGameMetadata(folderPath, folderName) {
         }
     }
 
-    // Check for Slim Status (Web only)
+    // Check for Slim Status (Web & Tyrano)
     let isSlim = false;
-    if (type === 'web') {
+    if (type === 'web' || type === 'tyrano') {
         const hasNwExe = fs.existsSync(path.join(folderPath, 'nw.exe'));
         const hasGameExe = fs.existsSync(path.join(folderPath, 'Game.exe'));
         const hasNwDll = fs.existsSync(path.join(folderPath, 'nw.dll'));
@@ -473,6 +514,7 @@ function createGameCard(game) {
     card.setAttribute('data-title', title); // For Search
     card.setAttribute('data-folder', path.basename(folderPath)); // For Search
     card.setAttribute('data-slim', isSlim); // For Filter
+    card.setAttribute('data-engine', type); // For Filter
 
     const cssIconPath = iconPath ? iconPath.replace(/\\/g, '/') : null;
 
@@ -529,7 +571,16 @@ function createGameCard(game) {
         }
 
         menu.append(new nw.MenuItem({ type: 'separator' }));
-        menu.append(new nw.MenuItem({ label: '瘦身 (移除 NW.js 執行檔)', click: () => confirmAndCleanGame(folderPath, title) }));
+        menu.append(new nw.MenuItem({
+            label: '瘦身 (移除 NW.js 執行檔)',
+            click: () => {
+                if (isScanning) {
+                    alert("正在背景掃描遊戲列表，請等待掃描完成後再執行瘦身操作。");
+                    return;
+                }
+                confirmAndCleanGame(folderPath, title);
+            }
+        }));
         menu.popup(e.x, e.y);
     });
 
@@ -553,7 +604,58 @@ function createGameCard(game) {
 
 function launchGame(folderPath, entryPoint, windowConfig, type, title) {
     if (title) document.title = title;
-    const fullEntryPath = path.join(folderPath, entryPoint);
+
+    // Auto-Patch: Check for Nore_Tes plugin issue
+    patchPluginsJs(folderPath);
+
+    // --- Safe Path Logic (Junction) ---
+    // Fix for paths with single quotes (e.g. "Ririka's") causing VM SyntaxError in NW.js/Node eval
+    let launchPath = folderPath;
+    let isJunction = false;
+    let junctionPath = null;
+
+    if (folderPath.includes("'")) {
+        try {
+            const os = require('os');
+            const crypto = require('crypto');
+
+            // Create a temp folder for junctions
+            const tempDir = path.join(os.tmpdir(), 'RpgLauncherLinks');
+            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+            // Create a unique hash for this path
+            const hash = crypto.createHash('md5').update(folderPath).digest('hex').substring(0, 8);
+
+            // Create a safe name (Title if safe, else "Game_Hash")
+            // Use regex to strip anything not alphanumeric
+            const safeTitle = (title || "Game").replace(/[^a-zA-Z0-9]/g, '');
+            junctionPath = path.join(tempDir, `${safeTitle}_${hash}`);
+
+            // Remove existing if any (stale)
+            if (fs.existsSync(junctionPath)) {
+                try {
+                    fs.unlinkSync(junctionPath); // Unlink if it's a file/symlink
+                } catch (e) {
+                    // If it's a directory?
+                    fs.rmdirSync(junctionPath);
+                }
+            }
+
+            // Create Junction
+            fs.symlinkSync(folderPath, junctionPath, 'junction');
+            console.log(`[Launcher] Created Safe Junction: ${junctionPath} -> ${folderPath}`);
+
+            launchPath = junctionPath;
+            isJunction = true;
+
+        } catch (e) {
+            console.error("[Launcher] Failed to create safe junction:", e);
+            // Fallback to original path
+            launchPath = folderPath;
+        }
+    }
+
+    const fullEntryPath = path.join(launchPath, entryPoint);
 
     if (type === 'web' || type === 'tyrano') {
         // --- Web/MV/MZ/Tyrano Launch Strategy ---
@@ -575,15 +677,16 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
             process.env.NODE_PATH = nodePathList.join(path.delimiter);
             require('module').Module._initPaths(); // Refresh paths
 
-            process.chdir(folderPath);
-            console.log('Changed CWD to:', folderPath);
+            process.chdir(launchPath);
+            console.log('Changed CWD to:', launchPath);
         } catch (e) {
             console.error('Failed to change CWD or setup paths', e);
         }
 
         // 2. Construct URL
-        const normalizedPath = fullEntryPath.replace(/\\/g, '/');
-        const targetUrl = `file:///${normalizedPath}`;
+        // Use pathToFileURL to handle special characters (spaces, brackets, etc.) safely
+        const url = require('url');
+        const targetUrl = url.pathToFileURL(fullEntryPath).href;
 
         // 3. Determine Window Size
         let targetWidth = appSettings.webWidth;
@@ -613,12 +716,20 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
         // Only for RPG Maker (Web/MV/MZ)
         if (type === 'web') {
             gameFrame.onload = () => {
-                injectGamePatches(folderPath);
+                // Determine path to patches relative to ORIGINAL folder to avoid confusion?
+                // Actually passing the launchPath (Junction) is probably safer for relative paths inside game.
+                // But patches might need to know real path for some reason?
+                // For now, let's use launchPath so the game thinks it's there.
+                try {
+                    injectGamePatches(launchPath);
+                } catch (e) {
+                    console.error("Patch Injection Failed:", e);
+                }
             };
         } else if (type === 'tyrano') {
             console.log("Launching Tyrano: Activating Node.js Environment...");
             gameFrame.onload = () => {
-                injectTyranoPatches(folderPath);
+                injectTyranoPatches(launchPath);
             };
         }
 
@@ -626,7 +737,7 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
         // --- Legacy EXE Strategy ---
         // Launch in separate process
         console.log(`Launching Legacy Game: ${fullEntryPath}`);
-        execFile(fullEntryPath, [], { cwd: folderPath }, (error, stdout, stderr) => {
+        execFile(fullEntryPath, [], { cwd: launchPath }, (error, stdout, stderr) => {
             if (error) {
                 console.error('Launch error:', error);
                 alert(`無法啟動遊戲: ${error.message}`);
@@ -639,8 +750,14 @@ function injectGamePatches(folderPath) {
     const win = gameFrame.contentWindow;
     if (!win) return;
 
+    // Detect Save Path: Check for 'www/save' first, else fallback to 'save'
+    let saveDir = path.join(folderPath, 'save');
+    if (fs.existsSync(path.join(folderPath, 'www', 'save'))) {
+        saveDir = path.join(folderPath, 'www', 'save');
+    }
+
     // Use JSON.stringify to safely escape path for string injection
-    const safePath = JSON.stringify(path.join(folderPath, 'save') + path.sep);
+    const safePath = JSON.stringify(saveDir + path.sep);
 
     const patchScript = `
         console.log("%c[Launcher] Injecting Single-Window Patches...", "color: cyan; font-weight: bold;");
@@ -759,21 +876,58 @@ function injectGamePatches(folderPath) {
             }
         }, 500);
         setTimeout(() => clearInterval(refreshInterval), 10000);
+
+        // --- Patch: Force HTTP 200 for file:// protocol (Fixes strict plugins like SkillTree) ---
+        // Some plugins strictly check for xhr.status === 200. In newer NW.js/iframe, local files return 0.
+        try {
+            const _OldXHR = window.XMLHttpRequest;
+            window.XMLHttpRequest = class extends _OldXHR {
+                get status() {
+                    let s = 0;
+                    try { s = super.status; } catch(e) {} // Handle readyState issues
+                    // If local file and status is 0, lie and say 200
+                    if (s === 0 && (window.location.protocol === 'file:' || (this.responseURL && this.responseURL.startsWith('file:')))) {
+                        return 200;
+                    }
+                    return s;
+                }
+            };
+            // Object.assign(window.XMLHttpRequest, _OldXHR); // Removed: Causes TypeError on read-only props
+            console.log("%c[Launcher] XHR Status Patch Applied (0 -> 200)", "color: lime;");
+        } catch(e) {
+            console.error("[Launcher] XHR Patch Failed:", e);
+        }
+
+        // --- Key Listener (F8/F12) - Capture Mode ---
+        // Some games prevent F8/F12. We prefer to allow them for debug.
+        document.addEventListener('keydown', (e) => {
+            // F8 / F12: DevTools (Force)
+            if (e.key === 'F8' || e.key === 'F12') {
+                e.preventDefault();
+                e.stopPropagation();
+                try {
+                    const win = nw.Window.get();
+                    win.showDevTools();
+                } catch(err) { console.error("Force DevTools Failed", err); }
+                return;
+            }
+            
+            // F9: RPG Maker Debug Menu (Force)
+            if (e.key === 'F9') {
+                if (typeof Scene_Debug !== 'undefined' && typeof SceneManager !== 'undefined') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try {
+                        SceneManager.push(Scene_Debug);
+                    } catch (e) { console.error("F9 Force Failed", e); }
+                }
+                return;
+            }
+        }, true); // USE_CAPTURE = true
     `;
 
     try {
         win.eval(patchScript);
-
-        // --- Key Listener (F8/F12) - Injected directly to window object ---
-        win.addEventListener('keydown', (e) => {
-            if (e.key === 'F8' || e.key === 'F12') {
-                e.preventDefault();
-                e.stopPropagation();
-                if (window.parent && window.parent.openGameDevTools) {
-                    window.parent.openGameDevTools();
-                }
-            }
-        });
 
     } catch (e) {
         console.error("Failed to inject into iframe", e);
@@ -878,31 +1032,142 @@ function injectTyranoPatches(folderPath) {
 
 
         // --- Key Listener (F8/F12) ---
-        window.addEventListener('keydown', (e) => {
+        // --- Key Listener (F8/F12/F10) - Capture Mode ---
+        document.addEventListener('keydown', (e) => {
+            // F8 / F12: DevTools
             if (e.key === 'F8' || e.key === 'F12') {
                 e.preventDefault();
                 e.stopPropagation();
-                if (window.parent && window.parent.openGameDevTools) {
-                    window.parent.openGameDevTools();
-                }
+                try {
+                    const win = nw.Window.get();
+                    win.showDevTools();
+                } catch(err) {} 
+                return;
             }
-        });
+        }, true);
     `;
 
     try {
         win.eval(patchScript);
     } catch (e) {
-        console.error("Failed to inject Tyrano patches", e);
+        console.error("Failed to inject Tyrano patches:", e);
     }
 }
 
 // Expose showLauncherView to global so iframe can access it via window.parent.showLauncherView()
 window.showLauncherView = showLauncherView;
 
-async function confirmAndCleanGame(folderPath, title) {
-    // Confirmation moved to after scanning logic to show specific file info
+// --- Utils ---
+async function getDriveType(inputPath) {
+    // 0: Unknown, 1: NoRoot, 2: Removable, 3: Fixed, 4: Network, 5: CD-ROM, 6: RAM
+    // Powershell snippet to get drive type
+    return new Promise((resolve) => {
+        try {
+            const root = path.parse(inputPath).root;
+            // Quick check for UNC path (starts with \\)
+            if (inputPath.startsWith('\\\\')) return resolve(4);
 
-    const filesToRemove = [
+            require('child_process').exec(`powershell -NoProfile -Command "(Get-WmiObject Win32_LogicalDisk | Where-Object {$_.DeviceID -eq '${root.replace('\\', '').replace(':', '')}'}).DriveType"`, (err, stdout) => {
+                if (err || !stdout) resolve(0);
+                else resolve(parseInt(stdout.trim()));
+            });
+        } catch (e) {
+            resolve(0);
+        }
+    });
+}
+
+function getItemSize(itemPath) {
+    try {
+        const stats = fs.statSync(itemPath);
+        if (stats.isDirectory()) {
+            let total = 0;
+            const files = fs.readdirSync(itemPath);
+            for (const f of files) total += getItemSize(path.join(itemPath, f));
+            return total;
+        } else {
+            return stats.size;
+        }
+    } catch (e) { return 0; }
+}
+
+function formatSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// --- Network Drive Detection ---
+// This function is now replaced by the new getDriveType above.
+// function getDriveType(rootPath) {
+//     return new Promise((resolve) => {
+//         const driveLetter = path.parse(rootPath).root.replace('\\', ''); // "C:"
+
+//         // UNC Path Check (Starts with \\)
+//         if (rootPath.startsWith('\\\\')) {
+//             resolve(4); // Treat as Network
+//             return;
+//         }
+
+//         // Mapped Drive Check via PowerShell
+//         const cmd = `powershell -NoProfile -Command "(Get-WmiObject -Class Win32_LogicalDisk -Filter \\"DeviceID='${driveLetter}'\\").DriveType"`;
+//         require('child_process').exec(cmd, (err, stdout) => {
+//             if (err) {
+//                 console.warn("Drive type check failed", err);
+//                 resolve(3); // Assume Local if failed
+//             } else {
+//                 const type = parseInt(stdout.trim());
+//                 resolve(isNaN(type) ? 3 : type);
+//             }
+//         });
+//     });
+// }
+
+function showSlimModal(title, count, sizeStr, isNetwork) {
+    return new Promise((resolve) => {
+        slimTitle.innerText = title;
+        slimCount.innerText = count;
+        slimSize.innerText = sizeStr;
+
+        if (isNetwork) {
+            networkWarning.classList.remove('hidden');
+        } else {
+            networkWarning.classList.add('hidden');
+        }
+
+        slimModal.classList.remove('hidden');
+
+        // Handlers
+        const close = () => {
+            slimModal.classList.add('hidden');
+            cleanup();
+            resolve(false);
+        };
+
+        const confirm = () => {
+            slimModal.classList.add('hidden');
+            cleanup();
+            resolve(true);
+        };
+
+        const cleanup = () => {
+            btnCloseSlim.removeEventListener('click', close);
+            btnCancelSlim.removeEventListener('click', close);
+            btnConfirmSlim.removeEventListener('click', confirm);
+        };
+
+        btnCloseSlim.addEventListener('click', close);
+        btnCancelSlim.addEventListener('click', close);
+        btnConfirmSlim.addEventListener('click', confirm);
+    });
+}
+
+// --- Slim Logic ---
+async function confirmAndCleanGame(folderPath, title) {
+    // 1. Standard "Junk" Files (Always Safe to Remove if they exist)
+    const standardFiles = [
         'nw.exe',
         'Game.exe',
         'crashpad_handler.exe',
@@ -919,21 +1184,45 @@ async function confirmAndCleanGame(folderPath, title) {
         'resources.pak',
         'icudtl.dat',
         'v8_context_snapshot.bin',
-        'credits.html'
+        'credits.html',
+        'd3dcompiler_47.dll',
+        'natives_blob.bin',
+        'nw_elf.dll',
+        'snapshot_blob.bin',
+        'ffmpegsumo.dll',
+        'nw.pak',
+        'pdf.dll'
     ];
 
-    // Auto-detect other .exe files (Renamed game loaders)
+    // Files we definitely plan to remove
+    let filesToRemove = [...standardFiles];
+
+    // 2. Network Check (Do this EARLY to decide on EXE logic)
+    let isNetwork = false;
+    try {
+        const driveType = await getDriveType(folderPath); // 4 = Network
+        if (driveType === 4) isNetwork = true;
+    } catch (e) {
+        console.warn("Network check error", e);
+    }
+
+    // 3. EXE Analysis
+    const allExes = [];
+    const nonStandardExes = [];
+
     try {
         const rootFiles = fs.readdirSync(folderPath);
         for (const file of rootFiles) {
             if (file.toLowerCase().endsWith('.exe')) {
-                // Exclude Uninstallers
+                // Ignore Uninstallers
                 if (file.toLowerCase().startsWith('unins')) continue;
-                // Exclude Launcher specific tools? (none expected in game folder)
 
-                // Add to list if not already present
-                if (!filesToRemove.includes(file)) {
-                    filesToRemove.push(file);
+                allExes.push(file);
+
+                // Check if it's a "Standard" name
+                // (Note: standardFiles includes nw.exe/Game.exe/helpers)
+                if (!standardFiles.includes(file)) {
+                    nonStandardExes.push(file);
                 }
             }
         }
@@ -941,68 +1230,211 @@ async function confirmAndCleanGame(folderPath, title) {
         console.warn("Autoscan for exe failed:", e);
     }
 
+    // 4. Decision Logic for EXEs
+    let warningMessage = "";
+
+    if (nonStandardExes.length > 0) {
+        if (isNetwork) {
+            // Case A: Network Drive + Non-Standard EXE -> SAFETY FIRST
+            // Do NOT delete non-standard EXEs.
+            // Also, do not auto-delete even standard EXEs if there's confusion? 
+            // Standard EXEs are useless without libraries, so ok to delete.
+            // But exclude non-standard ones from 'filesToRemove' (they aren't in there yet unless we push them)
+            warningMessage += "\n(注意：偵測到非標準名稱的執行檔，因位於網路磁碟，系統已跳過該檔案)";
+        } else {
+            // Local Drive
+            if (allExes.length === 1 && nonStandardExes.length === 1) {
+                // Case B: Exactly 1 EXE, and it is the non-standard one.
+                // "If non-standard name, prompt and delete" (User Request)
+                // We add it to the deletion list.
+                filesToRemove.push(nonStandardExes[0]);
+                warningMessage += `\n(已包含非標準執行檔: ${nonStandardExes[0]})`;
+            } else if (allExes.length > 1) {
+                // Case C: Multiple EXEs (e.g. Game.exe + Launcher.exe)
+                // "If > 1 exe, prompt user to manually delete"
+                // We SKIP adding non-standard EXEs.
+                // We also might want to remove Standard EXEs from the list to be safe? 
+                // Usually standard EXEs (nw.exe) are safe to delete as they are just the runner.
+                // But let's stick to: "Prompt user to manually delete".
+                // We will delete standard junk (dlls), but leave ambiguous EXEs?
+                // Let's filter OUT 'Game.exe' if there is ambiguity, just in case?
+                // No, 'Game.exe' is usually generic.
+                // We simply DO NOT ADD the non-standard ones.
+                warningMessage += "\n(注意：偵測到多個執行檔，請手動確認並刪除剩餘的 EXE)";
+            }
+        }
+    }
+    // Note: If no non-standard EXEs, we just delete the standard list (nw.exe/Game.exe etc), which is correct behavior.
+
     const foldersToRemove = [
         'locales',
         'swiftshader',
         'pnacl'
     ];
 
-    let deletedCount = 0;
-    let errors = 0;
+    // 5. Calculate Savings (using the FINAL filesToRemove list)
+    let totalBytes = 0;
+    let foundItems = 0;
+    for (const file of filesToRemove) {
+        const p = path.join(folderPath, file);
+        if (fs.existsSync(p)) {
+            totalBytes += getItemSize(p);
+            foundItems++;
+        }
+    }
+    for (const folder of foldersToRemove) {
+        const p = path.join(folderPath, folder);
+        if (fs.existsSync(p)) {
+            totalBytes += getItemSize(p);
+            foundItems++;
+        }
+    }
 
-    // Helper to run PowerShell command for recycling
-    const recycleItem = (itemPath, isDirectory) => {
-        return new Promise((resolve, reject) => {
-            // Escape single quotes for PowerShell
-            const safePath = itemPath.replace(/'/g, "''");
-            const method = isDirectory ? 'DeleteDirectory' : 'DeleteFile';
-            const command = `powershell.exe -NoProfile -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::${method}('${safePath}', 'OnlyErrorDialogs', 'SendToRecycleBin')"`;
+    if (foundItems === 0) {
+        alert("未發現可移除的 NW.js 檔案，此資料夾可能已經瘦身過。");
+        return;
+    }
 
-            require('child_process').exec(command, (err, stdout, stderr) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve();
+    const savedSizeStr = formatSize(totalBytes);
+
+    // 6. Show Confirmation Modal with CLI Logic
+    slimTitle.textContent = title;
+    slimCount.textContent = `${foundItems} 個項目`;
+    slimSize.textContent = savedSizeStr;
+
+    // Reset UI State
+    document.querySelector('.slim-stats').classList.remove('hidden');
+    document.querySelector('.warning-section').classList.remove('hidden');
+    document.getElementById('slim-cli').classList.add('hidden');
+    // Ensure content div exists
+    let cliContent = document.getElementById('slim-cli-content');
+    if (!cliContent) {
+        cliContent = document.createElement('div');
+        cliContent.id = 'slim-cli-content';
+        document.getElementById('slim-cli').appendChild(cliContent);
+    }
+    cliContent.innerHTML = '';
+
+    // Hide network warning by default
+    networkWarning.classList.add('hidden');
+    if (isNetwork) {
+        networkWarning.classList.remove('hidden');
+    }
+
+    // Reset Buttons
+    btnConfirmSlim.textContent = "確認瘦身";
+    btnConfirmSlim.disabled = false;
+    btnConfirmSlim.classList.remove('hidden');
+    btnCancelSlim.textContent = "取消";
+    btnCancelSlim.classList.remove('hidden');
+
+    slimModal.classList.remove('hidden');
+
+    // --- Helper: Appends line to CLI ---
+    const logCli = (msg, type = '') => {
+        const div = document.createElement('div');
+        div.className = `cli-line ${type}`;
+        div.textContent = msg;
+        const cliContent = document.getElementById('slim-cli-content');
+        if (cliContent) cliContent.appendChild(div);
+        // Auto scroll
+        document.getElementById('slim-cli').scrollTop = document.getElementById('slim-cli').scrollHeight;
+    };
+
+    // --- Clean Process Logic ---
+    const runCleanProcess = async () => {
+        // 1. UI Setup
+        document.querySelector('.slim-stats').classList.add('hidden');
+        document.querySelector('.warning-section').classList.add('hidden');
+        networkWarning.classList.add('hidden'); // Hide warning during run
+
+        const cliBox = document.getElementById('slim-cli');
+        cliBox.classList.remove('hidden');
+
+        btnConfirmSlim.disabled = true;
+        btnConfirmSlim.textContent = "執行中...";
+        btnCancelSlim.classList.add('hidden'); // Cannot cancel once started
+
+        logCli(`Starting cleanup for: ${title}`);
+        logCli(`Target path: ${folderPath}`);
+        if (isNetwork) logCli(`[WARN] Network drive detected. Files will be permanently deleted.`, 'warn');
+        if (warningMessage) logCli(warningMessage.trim(), 'warn');
+        logCli("---------------------------------------------------");
+
+        let deletedCount = 0;
+
+        // 2. Remove Files
+        for (const file of filesToRemove) {
+            const p = path.join(folderPath, file);
+            if (fs.existsSync(p)) {
+                try {
+                    // Artificial Delay for CLI effect
+                    await new Promise(r => setTimeout(r, 20));
+
+                    if (isNetwork) {
+                        fs.unlinkSync(p); // Network: Perm delete
+                    } else {
+                        nw.Shell.moveItemToTrash(p); // Local: Recycle Bin
+                    }
+                    logCli(`> Removing file: ${file}... OK`);
+                    deletedCount++;
+                } catch (e) {
+                    console.error('Delete failed:', p, e);
+                    logCli(`> Removing file: ${file}... FAILED (${e.message})`, 'error');
                 }
-            });
+            }
+        }
+
+        // 3. Remove Folders
+        for (const folder of foldersToRemove) {
+            const p = path.join(folderPath, folder);
+            if (fs.existsSync(p)) {
+                try {
+                    await new Promise(r => setTimeout(r, 20));
+                    if (isNetwork) {
+                        fs.rmdirSync(p, { recursive: true });
+                    } else {
+                        nw.Shell.moveItemToTrash(p);
+                    }
+                    logCli(`> Removing folder: ${folder}... OK`);
+                    deletedCount++;
+                } catch (e) {
+                    logCli(`> Removing folder: ${folder}... FAILED`, 'error');
+                }
+            }
+        }
+
+        // 4. Finish
+        logCli("---------------------------------------------------");
+        logCli(`Cleanup Complete!`, 'success');
+        logCli(`Removed: ${deletedCount} items`);
+        logCli(`Space Saved: ${savedSizeStr}`, 'success');
+
+        // Update UI to "Done" state
+        btnConfirmSlim.textContent = "完成";
+        btnConfirmSlim.disabled = false;
+
+        // Remove old listener to prevent re-run, add close listener
+        const newBtn = btnConfirmSlim.cloneNode(true);
+        btnConfirmSlim.parentNode.replaceChild(newBtn, btnConfirmSlim);
+
+        newBtn.addEventListener('click', () => {
+            slimModal.classList.add('hidden');
+            loadLibrary(libraryPath);
         });
     };
 
-    // Process Files
-    for (const file of filesToRemove) {
-        const filePath = path.join(folderPath, file);
-        if (fs.existsSync(filePath)) {
-            try {
-                await recycleItem(filePath, false);
-                deletedCount++;
-            } catch (e) {
-                console.error(`Failed to recycle ${file}`, e);
-                errors++;
-            }
-        }
-    }
 
-    // Process Folders
-    for (const folder of foldersToRemove) {
-        const dirPath = path.join(folderPath, folder);
-        if (fs.existsSync(dirPath)) {
-            try {
-                await recycleItem(dirPath, true);
-                deletedCount++;
-            } catch (e) {
-                console.error(`Failed to recycle folder ${folder}`, e);
-                errors++;
-            }
-        }
-    }
+    // Setup Event Listeners
+    // Clone buttons to remove previous listeners (or just use onclick)
+    document.getElementById('btn-confirm-slim').onclick = runCleanProcess;
 
-    if (errors > 0) {
-        alert(`瘦身完成，但在移動部分檔案至資源回收桶時發生錯誤。\n已移除: ${deletedCount} 個項目`);
-    } else if (deletedCount === 0) {
-        alert("未發現可移除的 NW.js 檔案，此資料夾可能已經瘦身過。");
-    } else {
-        alert(`瘦身成功！\n已將 ${deletedCount} 個 NW.js 相關檔案/資料夾移至資源回收桶。\n若遊戲無法執行，可隨時還原。`);
-    }
+    document.getElementById('btn-cancel-slim').onclick = () => {
+        slimModal.classList.add('hidden');
+    };
+    document.getElementById('btn-close-slim').onclick = () => {
+        slimModal.classList.add('hidden');
+    };
 }
 
 // --- DevTools Logic ---
@@ -1028,3 +1460,89 @@ document.addEventListener('keydown', (e) => {
         }
     }
 });
+
+// --- Window Controls (Frameless) ---
+(function initWindowControls() {
+    // Wait for nw object
+    if (typeof nw === 'undefined') return;
+
+    const win = nw.Window.get();
+    const btnMin = document.getElementById('win-minimize');
+    const btnMax = document.getElementById('win-maximize');
+    const btnClose = document.getElementById('win-close');
+
+    if (btnMin) {
+        btnMin.addEventListener('click', () => win.minimize());
+    }
+
+    if (btnMax) {
+        btnMax.addEventListener('click', () => {
+            // Check state by comparing dimension (heuristic)
+            if (window.outerWidth >= screen.availWidth * 0.95 && window.outerHeight >= screen.availHeight * 0.95) {
+                win.restore();
+            } else {
+                win.maximize();
+            }
+        });
+    }
+
+    if (btnClose) {
+        btnClose.addEventListener('click', () => win.close());
+    }
+})();
+// --- Plugin Patcher (Nore_Tes Fix) ---
+function patchPluginsJs(folderPath) {
+    const pluginsPath = path.join(folderPath, 'www', 'js', 'plugins.js');
+    if (!fs.existsSync(pluginsPath)) return;
+
+    try {
+        let content = fs.readFileSync(pluginsPath, 'utf8');
+        // Expected format: var $plugins = [...];
+        // Strip header/footer to get JSON
+        const jsonStart = content.indexOf('[');
+        const jsonEnd = content.lastIndexOf(']');
+
+        if (jsonStart === -1 || jsonEnd === -1) return;
+
+        const jsonStr = content.substring(jsonStart, jsonEnd + 1);
+        const plugins = JSON.parse(jsonStr);
+        let modified = false;
+
+        // Correct Scenario Path (Absolute + POSIX)
+        // Convert backslashes to forward slashes to match JS convention and avoid escaping issues
+        // e.g. "Y:/games/GameFolder/scenario/"
+        let scenarioAbsolutePath = path.join(folderPath, 'scenario').replace(/\\/g, '/');
+
+        // Ensure trailing slash
+        if (!scenarioAbsolutePath.endsWith('/')) scenarioAbsolutePath += '/';
+
+        for (const plugin of plugins) {
+            if (plugin.name === 'Nore_Tes' && plugin.status === true) {
+                if (plugin.parameters && plugin.parameters.scenarioFolder) {
+                    const val = plugin.parameters.scenarioFolder;
+
+                    // Update if it doesn't match our calculated absolute path
+                    if (val !== scenarioAbsolutePath) {
+                        console.log(`[Launcher] Patching Nore_Tes scenarioFolder: ${val} -> ${scenarioAbsolutePath}`);
+                        plugin.parameters.scenarioFolder = scenarioAbsolutePath;
+                        modified = true;
+                    }
+                }
+            }
+        }
+
+        if (modified) {
+            const prefix = content.substring(0, jsonStart);
+            const suffix = content.substring(jsonEnd + 1);
+
+            const newJson = JSON.stringify(plugins, null, 4);
+            const newContent = prefix + newJson + suffix;
+
+            fs.writeFileSync(pluginsPath, newContent, 'utf8');
+            console.log("[Launcher] plugins.js patched successfully.");
+        }
+
+    } catch (e) {
+        console.error("[Launcher] Failed to patch plugins.js", e);
+    }
+}
