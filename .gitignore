@@ -32,3 +32,8 @@ Thumbs.db
 .vscode/
 *.code-workspace
 *.lnk
+
+# Node and RPGMaker related
+node_modules/
+*.sav
+
