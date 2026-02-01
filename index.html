@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RPG Maker Launcher</title>
+    <link rel="icon" type="image/png" href="icon.png">
     <link rel="stylesheet" href="style.css">
     <!-- Using Google Fonts for Inter font family -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -22,20 +23,64 @@
                     <span class="icon">🔍</span>
                     <input type="text" id="search-input" placeholder="搜尋遊戲...">
                 </div>
-                <select id="filter-slim" class="filter-select">
-                    <option value="all">全顯示</option>
-                    <option value="slim">僅顯示 Slim</option>
-                    <option value="full">僅顯示完整版</option>
+                <!-- Integrated Sort (Visible) -->
+                <select id="sort-type" class="filter-select">
+                    <option value="name_asc">名稱 (A-Z)</option>
+                    <option value="name_desc">名稱 (Z-A)</option>
+                    <option value="date_desc">修改日期 (新-舊)</option>
+                    <option value="date_asc">修改日期 (舊-新)</option>
                 </select>
-                <select id="filter-engine" class="filter-select">
-                    <option value="all">所有引擎</option>
-                    <option value="web">RPG Maker (MV/MZ)</option>
-                    <option value="tyrano">TyranoBuilder</option>
-                    <option value="exe">Legacy EXE</option>
-                </select>
-                <button id="btn-settings" class="btn-secondary">
-                    <span class="icon">⚙️</span>
-                </button>
+
+                <!-- Filter Popover Button -->
+                <div class="tool-group">
+                    <button id="btn-filter-popover" class="btn-icon-only" title="篩選條件">
+                        <span class="icon">🔍</span>
+                    </button>
+                    <div id="filter-popover" class="popover hidden">
+                        <div class="popover-header">篩選器</div>
+                        <div class="popover-content">
+                            <div class="control-label">瘦身狀態</div>
+                            <select id="filter-slim" class="filter-select-full">
+                                <option value="all">不限</option>
+                                <option value="slim">僅顯示 Slim</option>
+                                <option value="full">僅顯示完整版</option>
+                            </select>
+                            <div class="control-label">遊戲引擎</div>
+                            <select id="filter-engine" class="filter-select-full">
+                                <option value="all">不限</option>
+                                <option value="web">RPG Maker (MV/MZ)</option>
+                                <option value="tyrano">TyranoBuilder</option>
+                                <option value="exe">Legacy EXE</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- More Tools Menu -->
+                <div class="tool-group">
+                    <button id="btn-more-tools" class="btn-icon-only" title="更多工具">
+                        <span class="icon">⋮</span>
+                    </button>
+                    <div id="more-menu" class="popover hidden">
+                        <div class="popover-content menu-content">
+                            <button id="btn-slim-all" class="menu-item text-danger">
+                                <span class="icon">🪄</span> 全部瘦身
+                            </button>
+                            <hr>
+                            <button id="btn-rescan" class="menu-item">
+                                <span class="icon">🔄</span> 快速重新整理
+                            </button>
+                            <button id="btn-deep-scan" class="menu-item">
+                                <span class="icon">🔎</span> 深度掃描
+                            </button>
+                            <hr>
+                            <button id="btn-settings" class="menu-item">
+                                <span class="icon">⚙️</span> 設定
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
                 <button id="btn-select-folder" class="btn-primary">
                     <span class="icon">📂</span> 設定遊戲庫
                 </button>

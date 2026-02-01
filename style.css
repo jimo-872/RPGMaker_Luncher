@@ -53,6 +53,7 @@ body.in-game .logo {
     /* Brighter logo in game */
 }
 
+
 /* Header */
 .top-bar {
     height: 48px;
@@ -236,6 +237,29 @@ body.in-game .logo {
     background-color: #2c2e33;
     color: white;
     border-color: #5c5f66;
+}
+
+.btn-danger {
+    background-color: #c92a2a;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background-color 0.2s;
+}
+
+.btn-danger:hover {
+    background-color: #a61e1e;
+}
+
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 .btn-large {
@@ -696,4 +720,125 @@ hr {
 .cli-line.success {
     color: #69db7c;
     font-weight: bold;
+}
+
+/* Tool Group & Popover */
+.tool-group {
+    position: relative;
+    -webkit-app-region: no-drag;
+}
+
+.btn-icon-only {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #909296;
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.btn-icon-only:hover {
+    background-color: #373a40;
+    color: #fff;
+    border-color: #5c5f66;
+}
+
+.popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background-color: #25262b;
+    border: 1px solid #373a40;
+    border-radius: 8px;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+    width: 200px;
+    animation: slideIn 0.2s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.popover-header {
+    padding: 8px 12px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #5c5f66;
+    text-transform: uppercase;
+    border-bottom: 1px solid #2c2e33;
+}
+
+.popover-content {
+    padding: 12px;
+}
+
+.menu-content {
+    padding: 4px;
+}
+
+.control-label {
+    font-size: 0.8rem;
+    color: #909296;
+    margin-bottom: 6px;
+    margin-top: 8px;
+}
+
+.control-label:first-child {
+    margin-top: 0;
+}
+
+.filter-select-full {
+    width: 100%;
+    appearance: none;
+    background-color: #141517;
+    color: #e4e5e7;
+    border: 1px solid #373a40;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.menu-item {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: #c1c2c5;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 0.9rem;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.2s;
+}
+
+.menu-item:hover {
+    background-color: #373a40;
+    color: #fff;
+}
+
+.menu-item.text-danger {
+    color: #ff8787;
+}
+
+.menu-item.text-danger:hover {
+    background-color: #c92a2a;
+    color: #fff;
 }
