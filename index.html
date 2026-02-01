@@ -14,31 +14,45 @@
 
     <div class="app-container">
 
+        <!-- Header (Global) -->
+        <header class="top-bar">
+            <div class="logo">RPG Launcher</div>
+            <div class="actions" id="header-actions">
+                <div class="search-box">
+                    <span class="icon">🔍</span>
+                    <input type="text" id="search-input" placeholder="搜尋遊戲...">
+                </div>
+                <select id="filter-slim" class="filter-select">
+                    <option value="all">全顯示</option>
+                    <option value="slim">僅顯示 Slim</option>
+                    <option value="full">僅顯示完整版</option>
+                </select>
+                <select id="filter-engine" class="filter-select">
+                    <option value="all">所有引擎</option>
+                    <option value="web">RPG Maker (MV/MZ)</option>
+                    <option value="tyrano">TyranoBuilder</option>
+                    <option value="exe">Legacy EXE</option>
+                </select>
+                <button id="btn-settings" class="btn-secondary">
+                    <span class="icon">⚙️</span>
+                </button>
+                <button id="btn-select-folder" class="btn-primary">
+                    <span class="icon">📂</span> 設定遊戲庫
+                </button>
+                <!-- nwdirectory is specific to NW.js for folder selection -->
+                <input type="file" id="folder-picker" nwdirectory style="display: none;">
+            </div>
+
+            <!-- Window Controls -->
+            <div class="window-controls">
+                <button id="win-minimize" class="win-btn" title="最小化">─</button>
+                <button id="win-maximize" class="win-btn" title="最大化">□</button>
+                <button id="win-close" class="win-btn btn-close-app" title="關閉">×</button>
+            </div>
+        </header>
+
         <!-- View: Launcher -->
         <div id="launcher-view" class="view-container">
-            <!-- Header -->
-            <header class="top-bar">
-                <div class="logo">RPG Launcher</div>
-                <div class="actions">
-                    <div class="search-box">
-                        <span class="icon">🔍</span>
-                        <input type="text" id="search-input" placeholder="搜尋遊戲...">
-                    </div>
-                    <select id="filter-slim" class="filter-select">
-                        <option value="all">全顯示</option>
-                        <option value="slim">僅顯示 Slim</option>
-                        <option value="full">僅顯示完整版</option>
-                    </select>
-                    <button id="btn-settings" class="btn-secondary">
-                        <span class="icon">⚙️</span>
-                    </button>
-                    <button id="btn-select-folder" class="btn-primary">
-                        <span class="icon">📂</span> 設定遊戲庫
-                    </button>
-                    <!-- nwdirectory is specific to NW.js for folder selection -->
-                    <input type="file" id="folder-picker" nwdirectory style="display: none;">
-                </div>
-            </header>
 
             <!-- Main Content -->
             <main id="main-content">
@@ -102,6 +116,57 @@
             </div>
             <div class="modal-footer">
                 <button id="btn-save-settings" class="btn-primary">儲存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Slim Confirmation Modal -->
+    <div id="slim-modal" class="modal-overlay hidden">
+        <div class="modal modal-large">
+            <div class="modal-header">
+                <h3>遊戲瘦身確認</h3>
+                <button id="btn-close-slim" class="btn-close">×</button>
+            </div>
+            <div class="modal-body">
+                <h4 id="slim-title" style="margin-bottom: 16px; color: #fff;">遊戲標題</h4>
+
+                <div class="slim-stats">
+                    <div class="stat-item">
+                        <span class="label">預計移除項目</span>
+                        <span class="value" id="slim-count">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="label">預計節省空間</span>
+                        <span class="value highlight" id="slim-size">0 MB</span>
+                    </div>
+                </div>
+
+                <div class="warning-section">
+                    <p>⚠️ <strong>注意：</strong></p>
+                    <ul>
+                        <li><small>用於啟動的執行檔 (Game.exe / nw.exe) 將被移除，請使用此啟動器執行遊戲。</small></li>
+                        <li><small>檔案將移至資源回收桶，若有問題可以隨時還原。</small></li>
+                    </ul>
+                </div>
+
+                <!-- Network Drive Warning -->
+                <div id="network-warning" class="danger-alert hidden">
+                    <div class="alert-icon">🛑</div>
+                    <div class="alert-content">
+                        <strong>警告：偵測到網路磁碟或外部裝置！</strong>
+                        <p>此路徑位於網路磁碟或未支援資源回收桶的裝置上。</p>
+                        <p class="highlight-red">執行瘦身將會【永久刪除】檔案且無法復原！</p>
+                    </div>
+                </div>
+
+                <!-- CLI Output (Hidden by default) -->
+                <div id="slim-cli" class="cli-output hidden">
+                    <div id="slim-cli-content"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-cancel-slim" class="btn-secondary">取消</button>
+                <button id="btn-confirm-slim" class="btn-danger-large">確認瘦身</button>
             </div>
         </div>
     </div>
