@@ -11,7 +11,21 @@ let appSettings = {
     recursiveScan: false
 };
 let isScanning = false;
-let pendingSlimTask = null;
+const busyPaths = new Set();
+const scannedPaths = new Set();
+let libGames = [];
+let currentSort = localStorage.getItem('rpg_sort_type') || 'name_asc';
+
+// --- Junk List (Shared for detection and cleaning) ---
+const SLIM_JUNK_FILES = [
+    'nw.exe', 'Game.exe', 'crashpad_handler.exe', 'notification_helper.exe',
+    'nw.dll', 'node.dll', 'ffmpeg.dll', 'libGLESv2.dll', 'libEGL.dll',
+    'vk_swiftshader.dll', 'vulcan-1.dll', 'nw_100_percent.pak', 'nw_200_percent.pak',
+    'resources.pak', 'icudtl.dat', 'v8_context_snapshot.bin', 'credits.html',
+    'd3dcompiler_47.dll', 'natives_blob.bin', 'nw_elf.dll', 'snapshot_blob.bin',
+    'ffmpegsumo.dll', 'nw.pak', 'pdf.dll'
+];
+const SLIM_JUNK_FOLDERS = ['locales', 'swiftshader', 'pnacl'];
 
 // Load saved settings
 const savedSettings = localStorage.getItem('app_settings');
@@ -49,6 +63,9 @@ const inputHeight = document.getElementById('setting-height');
 const inputFullscreen = document.getElementById('setting-fullscreen');
 
 const inputRecursive = document.getElementById('setting-recursive');
+
+const btnRescan = document.getElementById('btn-rescan');
+const btnSlimAll = document.getElementById('btn-slim-all');
 
 const slimModal = document.getElementById('slim-modal');
 const btnCloseSlim = document.getElementById('btn-close-slim');
@@ -129,26 +146,6 @@ function showLauncherView() {
     document.title = "RPG Maker Universal Launcher";
 }
 
-/* // --- Global Context Menu (Reload) ---
-document.addEventListener('contextmenu', (e) => {
-    // Only show if clicking on blank areas or header, not inside game frame (which has its own logic usually)
-    // But game frame is in a separate view.
-    if (e.target.closest('.game-card') || e.target.closest('input') || e.target.closest('select')) return;
-
-    e.preventDefault();
-    const menu = new nw.Menu();
-    menu.append(new nw.MenuItem({
-        label: '重新載入啟動器',
-        click: () => chrome.runtime.reload()
-    }));
-    menu.append(new nw.MenuItem({
-        label: '開啟開發者工具',
-        click: () => nw.Window.get().showDevTools()
-    }));
-
-    menu.popup(e.x, e.y);
-});
- */
 function showGameView(url, width, height, fullscreen) {
     // --- Start Game ---
     // console.log(`Launching ${folderPath} (${type})`); // folderPath and type are not available here.
@@ -235,12 +232,12 @@ function showEmptyState() {
     statusText.innerText = "等待設定遊戲庫...";
 }
 
-async function loadLibrary(rootPath) {
+async function loadLibrary(rootPath, forceDeep = false) {
     emptyState.classList.add('hidden');
     gameGrid.classList.remove('hidden');
 
-    // 1. Try Load from Cache
-    const cacheKey = `rpg_cache_${rootPath}`;
+    // 1. Try Load from Cache (Normalize path for key)
+    const cacheKey = `rpg_cache_${rootPath.toLowerCase()}`;
     const cachedData = localStorage.getItem(cacheKey);
 
     if (cachedData) {
@@ -260,10 +257,25 @@ async function loadLibrary(rootPath) {
 
     // 2. Background Scan
     isScanning = true;
-    try {
-        const games = await scanLibrary(rootPath);
+    if (btnRescan) {
+        btnRescan.disabled = true;
+        btnRescan.title = "掃描進行中...";
+    }
+    const btnDeepScan = document.getElementById('btn-deep-scan');
 
-        // 3. Update UI & Cache
+    if (btnDeepScan) {
+        btnDeepScan.disabled = true;
+        btnDeepScan.title = "掃描進行中...";
+    }
+    scannedPaths.clear();
+    try {
+        // Calculate isNetwork ONCE for the whole library to avoid per-game overhead
+        const driveType = await getDriveType(rootPath);
+        const isNetwork = (driveType === 4 || rootPath.startsWith('\\\\'));
+
+        const games = await scanLibrary(rootPath, forceDeep, isNetwork);
+
+        // 3. Update UI & Cache (Normalize path for key)
         renderGameList(games);
         localStorage.setItem(cacheKey, JSON.stringify(games));
 
@@ -279,38 +291,71 @@ async function loadLibrary(rootPath) {
         if (!cachedData) showEmptyState();
     } finally {
         isScanning = false;
-
-        // Execute Pending Task if any
-        if (pendingSlimTask) {
-            console.log("Executing pending slim task...", pendingSlimTask);
-            // Check if user closed the waiting modal? 
-            // In confirmAndCleanGame, we will just update the modal if it's open.
-            // But here we just call it.
-            confirmAndCleanGame(pendingSlimTask.folderPath, pendingSlimTask.title);
-            pendingSlimTask = null;
+        if (btnRescan) {
+            btnRescan.disabled = false;
+            btnRescan.title = "快速重新整理 (使用快取)";
+        }
+        const btnDeepScan = document.getElementById('btn-deep-scan');
+        if (btnDeepScan) {
+            btnDeepScan.disabled = false;
+            btnDeepScan.title = "深度掃描 (忽略快取)";
         }
     }
 }
 
-async function scanLibrary(rootPath) {
+async function refreshSingleGame(folderPath) {
+    const title = path.basename(folderPath); // Fallback title
+    // Force a deep scan to re-verify files (important after slim/rename)
+    const metadata = await getGameMetadata(folderPath, title, true);
+    if (!metadata) return;
+
+    // 1. Update global in-memory array (libGames)
+    const memIdx = libGames.findIndex(g => g.folderPath.toLowerCase() === folderPath.toLowerCase());
+    if (memIdx !== -1) {
+        libGames[memIdx] = metadata;
+    }
+    const cacheKey = `rpg_cache_${libraryPath.toLowerCase()}`;
+    const cachedData = localStorage.getItem(cacheKey);
+    if (cachedData) {
+        try {
+            let games = JSON.parse(cachedData);
+            const idx = games.findIndex(g => g.folderPath === folderPath);
+            if (idx !== -1) {
+                games[idx] = metadata;
+                localStorage.setItem(cacheKey, JSON.stringify(games));
+            }
+        } catch (e) { }
+    }
+
+    // Update UI Card
+    const card = document.querySelector(`.game-card[data-path=${JSON.stringify(folderPath)}]`);
+    if (card) {
+        const parent = card.parentNode;
+        const newCard = createGameCard(metadata);
+        parent.replaceChild(newCard, card);
+        applyFilters(); // Re-apply current search/filter
+    }
+}
+
+async function scanLibrary(rootPath, forceDeep = false, isNetwork = false) {
     let games = [];
 
     if (appSettings.recursiveScan) {
-        games = await scanRecursively(rootPath, 3);
+        games = await scanRecursively(rootPath, 3, forceDeep, isNetwork);
     } else {
         const items = await fs.promises.readdir(rootPath, { withFileTypes: true });
         const gameFolders = items.filter(dirent => dirent.isDirectory());
 
         for (const dir of gameFolders) {
             const fullPath = path.join(rootPath, dir.name);
-            const metadata = await getGameMetadata(fullPath, dir.name);
+            const metadata = await getGameMetadata(fullPath, dir.name, forceDeep, isNetwork);
             if (metadata) games.push(metadata);
         }
     }
     return games;
 }
 
-async function scanRecursively(currentPath, depth) {
+async function scanRecursively(currentPath, depth, forceDeep = false, isNetwork = false) {
     if (depth <= 0) return [];
     let games = [];
 
@@ -320,12 +365,12 @@ async function scanRecursively(currentPath, depth) {
         for (const dirent of items) {
             if (dirent.isDirectory()) {
                 const fullPath = path.join(currentPath, dirent.name);
-                const metadata = await getGameMetadata(fullPath, dirent.name);
+                const metadata = await getGameMetadata(fullPath, dirent.name, forceDeep, isNetwork);
 
                 if (metadata) {
                     games.push(metadata);
                 } else {
-                    const subGames = await scanRecursively(fullPath, depth - 1);
+                    const subGames = await scanRecursively(fullPath, depth - 1, forceDeep, isNetwork);
                     games = games.concat(subGames);
                 }
             }
@@ -334,176 +379,249 @@ async function scanRecursively(currentPath, depth) {
     return games;
 }
 
-async function getGameMetadata(folderPath, folderName) {
-    // 0. Filter out common non-game folders
-    // 'app', 'resources', 'www': Prevent detecting internal game structures as separate games
-    const ignoreList = ['manual', 'help', 'readme', 'documentation', 'css', 'js', 'fonts', 'images', 'img', 'audio', 'locales', 'app', 'resources', 'www', 'icon'];
-    if (ignoreList.includes(folderName.toLowerCase())) return null;
+async function getGameMetadata(folderPath, folderName, forceDeep = false, isNetwork = null) {
+    const cacheKey = `game_meta_${folderPath.toLowerCase()}`;
 
-    let entryPoint = null;
-    let type = 'unknown';
-
-    // 1. Check for Web/MV/MZ
-    // Stricter Check: Must have index.html AND (package.json OR js/ OR data/ OR www/)
-    const hasIndex = fs.existsSync(path.join(folderPath, 'index.html'));
-    const hasWwwIndex = fs.existsSync(path.join(folderPath, 'www', 'index.html'));
-
-    if (hasIndex) {
-        // 1. RPG Maker MV/MZ Check
-        if (fs.existsSync(path.join(folderPath, 'js', 'rpg_core.js')) ||
-            fs.existsSync(path.join(folderPath, 'js', 'rmmz_core.js'))) {
-            entryPoint = 'index.html';
-            type = 'web';
-        }
-        // 2. TyranoBuilder Check
-        else if (fs.existsSync(path.join(folderPath, 'tyrano'))) {
-            entryPoint = 'index.html';
-            type = 'tyrano';
-        }
-        // Also check for www folder structure (sometimes js is inside www)
-        else if (fs.existsSync(path.join(folderPath, 'www', 'js', 'rpg_core.js')) ||
-            fs.existsSync(path.join(folderPath, 'www', 'js', 'rmmz_core.js'))) {
-            entryPoint = 'index.html';
-            type = 'web';
+    // 1. Quick Path: Use cache if it exists and we're not forcing a deep scan
+    if (!forceDeep) {
+        const cached = localStorage.getItem(cacheKey);
+        if (cached) {
+            try {
+                const data = JSON.parse(cached);
+                // Basic validation: must match path (case-insensitive) and exist
+                if (data && data.folderPath.toLowerCase() === folderPath.toLowerCase() && fs.existsSync(folderPath)) {
+                    // Update scanned status for UI
+                    scannedPaths.add(folderPath);
+                    return data;
+                }
+            } catch (e) { }
         }
     }
 
-    if (!entryPoint && hasWwwIndex) {
-        // Enforce core check for www structure too
-        if (fs.existsSync(path.join(folderPath, 'www', 'js', 'rpg_core.js')) ||
-            fs.existsSync(path.join(folderPath, 'www', 'js', 'rmmz_core.js'))) {
-            entryPoint = 'www/index.html';
-            type = 'web';
-        }
-        // Check Tyrano in www? (Unlikely but possible)
-        else if (fs.existsSync(path.join(folderPath, 'www', 'tyrano'))) {
-            entryPoint = 'www/index.html';
-            type = 'tyrano';
-        }
-    }
-    /*     // 2. Check for Legacy EXE (Optional, can be removed if not needed)
-        else if (fs.existsSync(path.join(folderPath, 'Game.exe'))) {
-            entryPoint = 'Game.exe';
-            type = 'exe';
-        }
-     */
-    if (!entryPoint) return null;
+    if (busyPaths.has(folderPath)) return null;
+    busyPaths.add(folderPath);
+    try {
+        // 0. Filter out common non-game folders
+        // 'app', 'resources', 'www': Prevent detecting internal game structures as separate games
+        const ignoreList = ['manual', 'help', 'readme', 'documentation', 'css', 'js', 'fonts', 'images', 'img', 'audio', 'locales', 'app', 'resources', 'www', 'icon'];
+        if (ignoreList.includes(folderName.toLowerCase())) return null;
 
-    let title = null;
-    let iconPath = null;
-    let windowConfig = null;
+        let entryPoint = null;
+        let type = 'unknown';
 
-    // 1. Priority: System.json (RPG Maker) or Config.tjs (Tyrano)
-    if (type === 'web') {
-        try {
-            const possibleSysPaths = [
-                path.join(folderPath, 'www', 'data', 'System.json'),
-                path.join(folderPath, 'data', 'System.json')
-            ];
+        // 1. Check for Web/MV/MZ
+        // Stricter Check: Must have index.html AND (package.json OR js/ OR data/ OR www/)
+        const hasIndex = fs.existsSync(path.join(folderPath, 'index.html'));
+        const hasWwwIndex = fs.existsSync(path.join(folderPath, 'www', 'index.html'));
 
-            for (const sysPath of possibleSysPaths) {
-                if (fs.existsSync(sysPath)) {
-                    try {
-                        const sysData = JSON.parse(fs.readFileSync(sysPath, 'utf8'));
-                        if (sysData.gameTitle && sysData.gameTitle.trim() !== "") {
-                            title = sysData.gameTitle;
+        if (hasIndex) {
+            // 1. RPG Maker MV/MZ Check
+            if (fs.existsSync(path.join(folderPath, 'js', 'rpg_core.js')) ||
+                fs.existsSync(path.join(folderPath, 'js', 'rmmz_core.js'))) {
+                entryPoint = 'index.html';
+                type = 'web';
+            }
+            // 2. TyranoBuilder Check
+            else if (fs.existsSync(path.join(folderPath, 'tyrano'))) {
+                entryPoint = 'index.html';
+                type = 'tyrano';
+            }
+            // Also check for www folder structure (sometimes js is inside www)
+            else if (fs.existsSync(path.join(folderPath, 'www', 'js', 'rpg_core.js')) ||
+                fs.existsSync(path.join(folderPath, 'www', 'js', 'rmmz_core.js'))) {
+                entryPoint = 'index.html';
+                type = 'web';
+            }
+        }
+
+        if (!entryPoint && hasWwwIndex) {
+            // Enforce core check for www structure too
+            if (fs.existsSync(path.join(folderPath, 'www', 'js', 'rpg_core.js')) ||
+                fs.existsSync(path.join(folderPath, 'www', 'js', 'rmmz_core.js'))) {
+                entryPoint = 'www/index.html';
+                type = 'web';
+            }
+            // Check Tyrano in www? (Unlikely but possible)
+            else if (fs.existsSync(path.join(folderPath, 'www', 'tyrano'))) {
+                entryPoint = 'www/index.html';
+                type = 'tyrano';
+            }
+        }
+        /*     // 2. Check for Legacy EXE (Optional, can be removed if not needed)
+            else if (fs.existsSync(path.join(folderPath, 'Game.exe'))) {
+                entryPoint = 'Game.exe';
+                type = 'exe';
+            }
+         */
+        if (!entryPoint) return null;
+
+        let title = null;
+        let iconPath = null;
+        let windowConfig = null;
+
+        // 1. Priority: System.json (RPG Maker) or Config.tjs (Tyrano)
+        if (type === 'web') {
+            try {
+                const possibleSysPaths = [
+                    path.join(folderPath, 'www', 'data', 'System.json'),
+                    path.join(folderPath, 'data', 'System.json')
+                ];
+
+                for (const sysPath of possibleSysPaths) {
+                    if (fs.existsSync(sysPath)) {
+                        console.log(`[TitleCheck] Found System.json at: ${sysPath}`);
+                        try {
+                            const sysData = JSON.parse(fs.readFileSync(sysPath, 'utf8'));
+                            if (sysData.gameTitle && sysData.gameTitle.trim() !== "") {
+                                title = sysData.gameTitle;
+                                console.log(`[TitleCheck] Extracted RM title: "${title}"`);
+                                break;
+                            }
+                        } catch (jsonErr) {
+                            console.error(`[TitleCheck] Error parsing System.json: ${jsonErr.message}`);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('Failed to read System.json for', folderName, err);
+            }
+        } else if (type === 'tyrano') {
+            // Try parsing Config.tjs
+            try {
+                const possibleConfigPaths = [
+                    path.join(folderPath, 'data', 'system', 'Config.tjs'),
+                    path.join(folderPath, 'www', 'data', 'system', 'Config.tjs')
+                ];
+
+                for (const cfgPath of possibleConfigPaths) {
+                    if (fs.existsSync(cfgPath)) {
+                        // Read as buffer first to handle potential UTF-16
+                        const buffer = fs.readFileSync(cfgPath);
+                        let content = "";
+
+                        // Heuristic for UTF-16 LE
+                        if (buffer[0] === 0xFF && buffer[1] === 0xFE) {
+                            content = buffer.toString('utf16le');
+                        } else {
+                            content = buffer.toString('utf8');
+                        }
+
+                        // Debug: log first line or relevant part
+                        console.log(`[TitleCheck] Config.tjs content start: ${content.substring(0, 100).replace(/\r?\n/g, ' ')}...`);
+
+                        // Robust regex: capture whatever follows System.title
+                        const match = content.match(/System\.title\s*=\s*(["'])(.*?)\1/);
+                        if (match && match[2]) {
+                            title = match[2];
+                            console.log(`[TitleCheck] Extracted Tyrano title: "${title}"`);
                             break;
                         }
-                    } catch (jsonErr) { }
-                }
-            }
-        } catch (err) {
-            console.warn('Failed to read System.json for', folderName, err);
-        }
-    } else if (type === 'tyrano') {
-        // Try parsing Config.tjs
-        try {
-            const possibleConfigPaths = [
-                path.join(folderPath, 'data', 'system', 'Config.tjs'),
-                path.join(folderPath, 'www', 'data', 'system', 'Config.tjs')
-            ];
-
-            for (const cfgPath of possibleConfigPaths) {
-                if (fs.existsSync(cfgPath)) {
-                    const content = fs.readFileSync(cfgPath, 'utf8');
-                    // Look for ;System.title = "Title";
-                    const match = content.match(/;System\.title\s*=\s*"(.*?)";/);
-                    if (match && match[1]) {
-                        title = match[1];
-                        break;
                     }
+                }
+            } catch (e) {
+                console.warn('Failed to read Config.tjs for', folderName, e);
+            }
+        }
+
+        // 2. Secondary: package.json (Check root and www/)
+        try {
+            const possiblePkgPaths = [
+                path.join(folderPath, 'package.json'),
+                path.join(folderPath, 'www', 'package.json')
+            ];
+            for (const pkgPath of possiblePkgPaths) {
+                if (fs.existsSync(pkgPath)) {
+                    console.log(`[TitleCheck] Found package.json at: ${pkgPath}`);
+                    const pkgData = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                    if (!title && pkgData.name && pkgData.name !== "rmmz-game" && pkgData.name !== "rmmv-game") {
+                        title = pkgData.name;
+                    }
+                    if (pkgData.window && !windowConfig) windowConfig = pkgData.window;
+                    if (title) break;
                 }
             }
         } catch (e) {
-            console.warn('Failed to read Config.tjs for', folderName, e);
+            console.warn('Failed to read package.json metadata for', folderName);
         }
-    }
 
-    // 2. Secondary: package.json
-    try {
-        const pkgPath = path.join(folderPath, 'package.json');
-        if (fs.existsSync(pkgPath)) {
-            const pkgData = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-            if (!title && pkgData.name && pkgData.name !== "rmmz-game") {
-                title = pkgData.name;
+        // 3. Fallback
+        if (!title) {
+            title = folderName;
+            // Filter out [RJ12345678] pattern (DLsite codes)
+            title = title.replace(/\[RJ\d+\]/gi, '').trim();
+        }
+
+        // Extract RJ Code for context menu (from folderName)
+        let rjCode = null;
+        const rjMatch = folderName.match(/(RJ\d+)/i);
+        if (rjMatch) {
+            rjCode = rjMatch[1].toUpperCase();
+        }
+
+        // Try finding icon 
+        const possibleIcons = [
+            path.join(folderPath, 'icon.png'),
+            path.join(folderPath, 'www', 'icon.png'),
+            path.join(folderPath, 'icon', 'icon.png')
+        ];
+
+        for (const p of possibleIcons) {
+            if (fs.existsSync(p)) {
+                iconPath = p;
+                break;
             }
-            if (pkgData.window) windowConfig = pkgData.window;
         }
-    } catch (e) {
-        console.warn('Failed to read metadata for', folderName);
-    }
 
-    // 3. Fallback
-    if (!title) {
-        title = folderName;
-        // Filter out [RJ12345678] pattern (DLsite codes)
-        title = title.replace(/\[RJ\d+\]/gi, '').trim();
-    }
+        // Check for Slim Status (Web & Tyrano)
+        let isSlim = false;
+        if (type === 'web' || type === 'tyrano') {
+            // Use passed isNetwork if available (significant performance gain); otherwise calculate (fallback)
+            let actualIsNetwork = isNetwork;
+            if (actualIsNetwork === null) {
+                const driveType = await getDriveType(folderPath);
+                actualIsNetwork = (driveType === 4 || folderPath.startsWith('\\\\'));
+            }
 
-    // Extract RJ Code for context menu (from folderName)
-    let rjCode = null;
-    const rjMatch = folderName.match(/(RJ\d+)/i);
-    if (rjMatch) {
-        rjCode = rjMatch[1].toUpperCase();
-    }
+            const { filesToRemove, foldersToRemove } = await getJunkDetails(folderPath, actualIsNetwork);
+            const junkItems = [...filesToRemove, ...foldersToRemove];
 
-    // Try finding icon 
-    const possibleIcons = [
-        path.join(folderPath, 'icon.png'),
-        path.join(folderPath, 'www', 'icon.png'),
-        path.join(folderPath, 'icon', 'icon.png')
-    ];
-
-    for (const p of possibleIcons) {
-        if (fs.existsSync(p)) {
-            iconPath = p;
-            break;
+            if (junkItems.length > 0) {
+                console.warn(`[SlimCheck] ${folderName} is NOT slim. Found:`, junkItems);
+                isSlim = false;
+            } else {
+                isSlim = true;
+            }
         }
+
+        const stats = fs.statSync(folderPath);
+        const mtime = stats.mtimeMs;
+
+        const metadata = { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim, rjCode, mtime };
+        // Save to individual cache (Normalize path for key)
+        localStorage.setItem(cacheKey, JSON.stringify(metadata));
+        return metadata;
+    } finally {
+        busyPaths.delete(folderPath);
+        scannedPaths.add(folderPath);
     }
-
-    // Check for Slim Status (Web & Tyrano)
-    let isSlim = false;
-    if (type === 'web' || type === 'tyrano') {
-        const hasNwExe = fs.existsSync(path.join(folderPath, 'nw.exe'));
-        const hasGameExe = fs.existsSync(path.join(folderPath, 'Game.exe'));
-        const hasNwDll = fs.existsSync(path.join(folderPath, 'nw.dll'));
-
-        // If NO executables AND NO runtime dll, then it's slim
-        // If it has nw.dll, it's definitely NOT slim (even if exe is renamed)
-        if (!hasNwExe && !hasGameExe && !hasNwDll) {
-            isSlim = true;
-        }
-    }
-
-    return { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim, rjCode };
 }
 
 function renderGameList(games) {
+    libGames = games;
     gameGrid.innerHTML = '';
-    games.sort((a, b) => a.title.localeCompare(b.title));
 
-    games.forEach(game => {
-        createGameCard(game);
+    // Sorting logic
+    const sortedGames = [...games].sort((a, b) => {
+        if (currentSort === 'name_asc') return a.title.localeCompare(b.title);
+        if (currentSort === 'name_desc') return b.title.localeCompare(a.title);
+        if (currentSort === 'date_desc') return (b.mtime || 0) - (a.mtime || 0);
+        if (currentSort === 'date_asc') return (a.mtime || 0) - (b.mtime || 0);
+        return a.title.localeCompare(b.title);
+    });
+
+    sortedGames.forEach(game => {
+        const card = createGameCard(game);
+        gameGrid.appendChild(card);
     });
 }
 
@@ -511,6 +629,7 @@ function createGameCard(game) {
     const { title, folderPath, entryPoint, iconPath, windowConfig, type, isSlim, rjCode } = game;
     const card = document.createElement('div');
     card.className = 'game-card';
+    card.setAttribute('data-path', folderPath);
     card.setAttribute('data-title', title); // For Search
     card.setAttribute('data-folder', path.basename(folderPath)); // For Search
     card.setAttribute('data-slim', isSlim); // For Filter
@@ -574,8 +693,12 @@ function createGameCard(game) {
         menu.append(new nw.MenuItem({
             label: '瘦身 (移除 NW.js 執行檔)',
             click: () => {
-                if (isScanning) {
-                    alert("正在背景掃描遊戲列表，請等待掃描完成後再執行瘦身操作。");
+                if (busyPaths.has(folderPath)) {
+                    alert("該遊戲資料夾正忙碌中，請稍候。");
+                    return;
+                }
+                if (!scannedPaths.has(folderPath)) {
+                    alert("該遊戲尚未完成掃描驗證，請等待背景掃描或更新完成。");
                     return;
                 }
                 confirmAndCleanGame(folderPath, title);
@@ -597,7 +720,7 @@ function createGameCard(game) {
     pathEl.style.textDecoration = "underline";
     pathEl.style.textDecorationStyle = "dotted";
 
-    gameGrid.appendChild(card);
+    return card;
 }
 
 // --- Launch Game Logic ---
@@ -716,12 +839,11 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
         // Only for RPG Maker (Web/MV/MZ)
         if (type === 'web') {
             gameFrame.onload = () => {
-                // Determine path to patches relative to ORIGINAL folder to avoid confusion?
-                // Actually passing the launchPath (Junction) is probably safer for relative paths inside game.
-                // But patches might need to know real path for some reason?
-                // For now, let's use launchPath so the game thinks it's there.
                 try {
                     injectGamePatches(launchPath);
+                    // Expose game window for console debugging
+                    window.game = gameFrame.contentWindow;
+                    console.log("[Launcher] Game window exposed as 'window.game' for console access.");
                 } catch (e) {
                     console.error("Patch Injection Failed:", e);
                 }
@@ -730,6 +852,9 @@ function launchGame(folderPath, entryPoint, windowConfig, type, title) {
             console.log("Launching Tyrano: Activating Node.js Environment...");
             gameFrame.onload = () => {
                 injectTyranoPatches(launchPath);
+                // Expose game window for console debugging
+                window.game = gameFrame.contentWindow;
+                console.log("[Launcher] Game window exposed as 'window.game' for console access.");
             };
         }
 
@@ -1058,22 +1183,95 @@ function injectTyranoPatches(folderPath) {
 window.showLauncherView = showLauncherView;
 
 // --- Utils ---
+/**
+ * Safe version of moveItemToTrash that fallbacks to permanent delete if needed
+ */
+function safeRemoveItem(p, isNetwork = false) {
+    if (isNetwork || !nw.Shell || typeof nw.Shell.moveItemToTrash !== 'function') {
+        const stats = fs.statSync(p);
+        if (stats.isDirectory()) {
+            fs.rmSync(p, { recursive: true });
+        } else {
+            fs.unlinkSync(p);
+        }
+    } else {
+        nw.Shell.moveItemToTrash(p);
+    }
+}
+
+/**
+ * Atomic batch delete: Collects items into a temp folder then removes once.
+ */
+function atomicBatchDelete(folderPath, itemList, isNetwork = false, logCallback = null) {
+    const junkDirName = `.slim_junk_${Date.now()}`;
+    const junkDir = path.join(folderPath, junkDirName);
+    let itemsFound = [];
+
+    // 1. Identify existing items
+    for (const name of itemList) {
+        const full = path.join(folderPath, name);
+        if (fs.existsSync(full)) {
+            itemsFound.push({ name: name, full: full });
+        }
+    }
+
+    if (itemsFound.length === 0) return 0;
+
+    try {
+        // 2. Create temp folder
+        if (!fs.existsSync(junkDir)) fs.mkdirSync(junkDir);
+
+        // 3. Move items inward
+        for (const item of itemsFound) {
+            const dest = path.join(junkDir, item.name);
+            const destParent = path.dirname(dest);
+            if (!fs.existsSync(destParent)) fs.mkdirSync(destParent, { recursive: true });
+
+            try {
+                fs.renameSync(item.full, dest);
+                if (logCallback) logCallback(`  收集: ${item.name}`);
+            } catch (renameErr) {
+                // cross-volume fallback
+                const stats = fs.statSync(item.full);
+                if (stats.isDirectory()) {
+                    fs.cpSync(item.full, dest, { recursive: true });
+                    fs.rmSync(item.full, { recursive: true });
+                } else {
+                    fs.copyFileSync(item.full, dest);
+                    fs.unlinkSync(item.full);
+                }
+                if (logCallback) logCallback(`  收集 (移轉): ${item.name}`);
+            }
+        }
+
+        // 4. Delete the whole folder
+        if (logCallback) logCallback(`>>> 執行整併刪除...`);
+        safeRemoveItem(junkDir, isNetwork);
+
+        return itemsFound.length;
+    } catch (e) {
+        if (logCallback) logCallback(`  [錯誤] 原子刪除失敗: ${e.message}`);
+        throw e;
+    }
+}
+
 async function getDriveType(inputPath) {
-    // 0: Unknown, 1: NoRoot, 2: Removable, 3: Fixed, 4: Network, 5: CD-ROM, 6: RAM
-    // Powershell snippet to get drive type
     return new Promise((resolve) => {
         try {
-            const root = path.parse(inputPath).root;
-            // Quick check for UNC path (starts with \\)
+            // UNC Path Check
             if (inputPath.startsWith('\\\\')) return resolve(4);
 
-            require('child_process').exec(`powershell -NoProfile -Command "(Get-WmiObject Win32_LogicalDisk | Where-Object {$_.DeviceID -eq '${root.replace('\\', '').replace(':', '')}'}).DriveType"`, (err, stdout) => {
+            const root = path.parse(inputPath).root; // e.g. "C:\" or "Y:\"
+            const driveLetter = root.substring(0, 2); // e.g. "C:" or "Y:"
+
+            require('child_process').exec(`powershell -NoProfile -Command "(Get-WmiObject Win32_LogicalDisk -Filter \\"DeviceID='${driveLetter}'\\").DriveType"`, (err, stdout) => {
                 if (err || !stdout) resolve(0);
-                else resolve(parseInt(stdout.trim()));
+                else {
+                    const type = parseInt(stdout.trim());
+                    resolve(isNaN(type) ? 0 : type);
+                }
             });
-        } catch (e) {
-            resolve(0);
-        }
+        } catch (e) { resolve(0); }
     });
 }
 
@@ -1099,199 +1297,116 @@ function formatSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// --- Network Drive Detection ---
-// This function is now replaced by the new getDriveType above.
-// function getDriveType(rootPath) {
-//     return new Promise((resolve) => {
-//         const driveLetter = path.parse(rootPath).root.replace('\\', ''); // "C:"
 
-//         // UNC Path Check (Starts with \\)
-//         if (rootPath.startsWith('\\\\')) {
-//             resolve(4); // Treat as Network
-//             return;
-//         }
 
-//         // Mapped Drive Check via PowerShell
-//         const cmd = `powershell -NoProfile -Command "(Get-WmiObject -Class Win32_LogicalDisk -Filter \\"DeviceID='${driveLetter}'\\").DriveType"`;
-//         require('child_process').exec(cmd, (err, stdout) => {
-//             if (err) {
-//                 console.warn("Drive type check failed", err);
-//                 resolve(3); // Assume Local if failed
-//             } else {
-//                 const type = parseInt(stdout.trim());
-//                 resolve(isNaN(type) ? 3 : type);
-//             }
-//         });
-//     });
-// }
+/**
+ * Shared helper to find all junk items in a folder.
+ */
+async function getJunkDetails(folderPath, isNetwork) {
+    let filesToRemove = [];
+    let warnings = "";
 
-function showSlimModal(title, count, sizeStr, isNetwork) {
-    return new Promise((resolve) => {
-        slimTitle.innerText = title;
-        slimCount.innerText = count;
-        slimSize.innerText = sizeStr;
-
-        if (isNetwork) {
-            networkWarning.classList.remove('hidden');
-        } else {
-            networkWarning.classList.add('hidden');
+    // 1. Collect standard files
+    for (const f of SLIM_JUNK_FILES) {
+        if (fs.existsSync(path.join(folderPath, f))) {
+            filesToRemove.push(f);
         }
-
-        slimModal.classList.remove('hidden');
-
-        // Handlers
-        const close = () => {
-            slimModal.classList.add('hidden');
-            cleanup();
-            resolve(false);
-        };
-
-        const confirm = () => {
-            slimModal.classList.add('hidden');
-            cleanup();
-            resolve(true);
-        };
-
-        const cleanup = () => {
-            btnCloseSlim.removeEventListener('click', close);
-            btnCancelSlim.removeEventListener('click', close);
-            btnConfirmSlim.removeEventListener('click', confirm);
-        };
-
-        btnCloseSlim.addEventListener('click', close);
-        btnCancelSlim.addEventListener('click', close);
-        btnConfirmSlim.addEventListener('click', confirm);
-    });
-}
-
-// --- Slim Logic ---
-async function confirmAndCleanGame(folderPath, title) {
-    // 1. Standard "Junk" Files (Always Safe to Remove if they exist)
-    const standardFiles = [
-        'nw.exe',
-        'Game.exe',
-        'crashpad_handler.exe',
-        'notification_helper.exe',
-        'nw.dll',
-        'node.dll',
-        'ffmpeg.dll',
-        'libGLESv2.dll',
-        'libEGL.dll',
-        'vk_swiftshader.dll',
-        'vulcan-1.dll',
-        'nw_100_percent.pak',
-        'nw_200_percent.pak',
-        'resources.pak',
-        'icudtl.dat',
-        'v8_context_snapshot.bin',
-        'credits.html',
-        'd3dcompiler_47.dll',
-        'natives_blob.bin',
-        'nw_elf.dll',
-        'snapshot_blob.bin',
-        'ffmpegsumo.dll',
-        'nw.pak',
-        'pdf.dll'
-    ];
-
-    // Files we definitely plan to remove
-    let filesToRemove = [...standardFiles];
-
-    // 2. Network Check (Do this EARLY to decide on EXE logic)
-    let isNetwork = false;
-    try {
-        const driveType = await getDriveType(folderPath); // 4 = Network
-        if (driveType === 4) isNetwork = true;
-    } catch (e) {
-        console.warn("Network check error", e);
     }
 
-    // 3. EXE Analysis
+    // 2. EXE Analysis
     const allExes = [];
     const nonStandardExes = [];
-
     try {
         const rootFiles = fs.readdirSync(folderPath);
         for (const file of rootFiles) {
             if (file.toLowerCase().endsWith('.exe')) {
-                // Ignore Uninstallers
                 if (file.toLowerCase().startsWith('unins')) continue;
-
                 allExes.push(file);
-
-                // Check if it's a "Standard" name
-                // (Note: standardFiles includes nw.exe/Game.exe/helpers)
-                if (!standardFiles.includes(file)) {
-                    nonStandardExes.push(file);
-                }
+                if (!SLIM_JUNK_FILES.includes(file)) nonStandardExes.push(file);
             }
         }
-    } catch (e) {
-        console.warn("Autoscan for exe failed:", e);
-    }
-
-    // 4. Decision Logic for EXEs
-    let warningMessage = "";
+    } catch (e) { }
 
     if (nonStandardExes.length > 0) {
         if (isNetwork) {
-            // Case A: Network Drive + Non-Standard EXE -> SAFETY FIRST
-            // Do NOT delete non-standard EXEs.
-            // Also, do not auto-delete even standard EXEs if there's confusion? 
-            // Standard EXEs are useless without libraries, so ok to delete.
-            // But exclude non-standard ones from 'filesToRemove' (they aren't in there yet unless we push them)
-            warningMessage += "\n(注意：偵測到非標準名稱的執行檔，因位於網路磁碟，系統已跳過該檔案)";
+            warnings += "\n(注意：偵測到非標準執行檔，因位於網路磁碟已跳過)";
         } else {
-            // Local Drive
             if (allExes.length === 1 && nonStandardExes.length === 1) {
-                // Case B: Exactly 1 EXE, and it is the non-standard one.
-                // "If non-standard name, prompt and delete" (User Request)
-                // We add it to the deletion list.
                 filesToRemove.push(nonStandardExes[0]);
-                warningMessage += `\n(已包含非標準執行檔: ${nonStandardExes[0]})`;
+                warnings += `\n(包含非標準執行檔: ${nonStandardExes[0]})`;
             } else if (allExes.length > 1) {
-                // Case C: Multiple EXEs (e.g. Game.exe + Launcher.exe)
-                // "If > 1 exe, prompt user to manually delete"
-                // We SKIP adding non-standard EXEs.
-                // We also might want to remove Standard EXEs from the list to be safe? 
-                // Usually standard EXEs (nw.exe) are safe to delete as they are just the runner.
-                // But let's stick to: "Prompt user to manually delete".
-                // We will delete standard junk (dlls), but leave ambiguous EXEs?
-                // Let's filter OUT 'Game.exe' if there is ambiguity, just in case?
-                // No, 'Game.exe' is usually generic.
-                // We simply DO NOT ADD the non-standard ones.
-                warningMessage += "\n(注意：偵測到多個執行檔，請手動確認並刪除剩餘的 EXE)";
+                warnings += "\n(注意：偵測到多個執行檔，請手動確認剩餘 EXE)";
             }
         }
     }
-    // Note: If no non-standard EXEs, we just delete the standard list (nw.exe/Game.exe etc), which is correct behavior.
 
-    const foldersToRemove = [
-        'locales',
-        'swiftshader',
-        'pnacl'
-    ];
+    // 3. Folders
+    let actualFolders = [];
+    for (const f of SLIM_JUNK_FOLDERS) {
+        if (fs.existsSync(path.join(folderPath, f))) {
+            actualFolders.push(f);
+        }
+    }
 
-    // 5. Calculate Savings (using the FINAL filesToRemove list)
+    return { filesToRemove, foldersToRemove: actualFolders, warningMessage: warnings };
+}
+
+
+/**
+ * Identifies all redundant items in a game folder.
+ * Returns { filesToRemove, foldersToRemove, totalBytes, foundItems, warningMessage }
+ */
+async function identifyJunkItems(folderPath, isNetwork) {
+    const { filesToRemove, foldersToRemove, warningMessage } = await getJunkDetails(folderPath, isNetwork);
+
+    // Calculate Size
     let totalBytes = 0;
-    let foundItems = 0;
-    for (const file of filesToRemove) {
-        const p = path.join(folderPath, file);
-        if (fs.existsSync(p)) {
-            totalBytes += getItemSize(p);
-            foundItems++;
-        }
+    let foundCount = 0;
+    const combined = [...filesToRemove, ...foldersToRemove];
+    for (const item of combined) {
+        totalBytes += getItemSize(path.join(folderPath, item));
+        foundCount++;
     }
-    for (const folder of foldersToRemove) {
-        const p = path.join(folderPath, folder);
-        if (fs.existsSync(p)) {
-            totalBytes += getItemSize(p);
-            foundItems++;
-        }
+
+    return {
+        filesToRemove,
+        foldersToRemove,
+        totalBytes,
+        foundItems: foundCount,
+        warningMessage
+    };
+}
+
+
+// --- Slim Logic ---
+async function confirmAndCleanGame(folderPath, title) {
+    if (busyPaths.has(folderPath)) {
+        alert("該路徑正忙碌中，請先關閉目前的處理視窗。");
+        return;
     }
+    busyPaths.add(folderPath);
+
+    // Reset Modal (in case batch changed it)
+    document.querySelector('.slim-stats').classList.remove('hidden');
+    document.querySelector('.warning-section').classList.remove('hidden');
+    document.getElementById('slim-cli').classList.add('hidden');
+    document.getElementById('btn-confirm-slim').classList.remove('hidden');
+    document.getElementById('btn-cancel-slim').classList.add('btn-secondary');
+    document.getElementById('btn-cancel-slim').classList.remove('btn-primary');
+    document.getElementById('btn-cancel-slim').innerText = "取消";
+    document.getElementById('btn-cancel-slim').disabled = false;
+
+    // 0. Determine if it's a network drive
+    const driveType = await getDriveType(folderPath);
+    const isNetwork = (driveType === 4 || folderPath.startsWith('\\\\'));
+
+    // 1. Analyze items comprehensively
+    const analysis = await identifyJunkItems(folderPath, isNetwork);
+    const { filesToRemove, foldersToRemove, totalBytes, foundItems, warningMessage } = analysis;
 
     if (foundItems === 0) {
         alert("未發現可移除的 NW.js 檔案，此資料夾可能已經瘦身過。");
+        busyPaths.delete(folderPath);
         return;
     }
 
@@ -1361,67 +1476,35 @@ async function confirmAndCleanGame(folderPath, title) {
         if (warningMessage) logCli(warningMessage.trim(), 'warn');
         logCli("---------------------------------------------------");
 
-        let deletedCount = 0;
+        // 2. Atomic Delete
+        logCli(">>> 正在進行項目的原子化整併...");
 
-        // 2. Remove Files
-        for (const file of filesToRemove) {
-            const p = path.join(folderPath, file);
-            if (fs.existsSync(p)) {
-                try {
-                    // Artificial Delay for CLI effect
-                    await new Promise(r => setTimeout(r, 20));
+        const combinedTargets = [...filesToRemove, ...foldersToRemove];
+        try {
+            const deletedCount = atomicBatchDelete(folderPath, combinedTargets, isNetwork, (msg) => logCli(msg));
 
-                    if (isNetwork) {
-                        fs.unlinkSync(p); // Network: Perm delete
-                    } else {
-                        nw.Shell.moveItemToTrash(p); // Local: Recycle Bin
-                    }
-                    logCli(`> Removing file: ${file}... OK`);
-                    deletedCount++;
-                } catch (e) {
-                    console.error('Delete failed:', p, e);
-                    logCli(`> Removing file: ${file}... FAILED (${e.message})`, 'error');
-                }
-            }
+            // 3. Patch plugins.js
+            logCli("---------------------------------------------------");
+            logCli(">>> 正在套用插件修復 (plugins.js)...");
+            patchPluginsJs(folderPath);
+
+            // 4. Finish
+            logCli("---------------------------------------------------");
+            logCli(`Cleanup Complete!`, 'success');
+            logCli(`Removed: ${deletedCount} items`);
+            logCli(`Space Saved: ${savedSizeStr}`, 'success');
+        } catch (err) {
+            logCli(`>>> 執行過程發生錯誤: ${err.message}`, 'error');
         }
-
-        // 3. Remove Folders
-        for (const folder of foldersToRemove) {
-            const p = path.join(folderPath, folder);
-            if (fs.existsSync(p)) {
-                try {
-                    await new Promise(r => setTimeout(r, 20));
-                    if (isNetwork) {
-                        fs.rmdirSync(p, { recursive: true });
-                    } else {
-                        nw.Shell.moveItemToTrash(p);
-                    }
-                    logCli(`> Removing folder: ${folder}... OK`);
-                    deletedCount++;
-                } catch (e) {
-                    logCli(`> Removing folder: ${folder}... FAILED`, 'error');
-                }
-            }
-        }
-
-        // 4. Finish
-        logCli("---------------------------------------------------");
-        logCli(`Cleanup Complete!`, 'success');
-        logCli(`Removed: ${deletedCount} items`);
-        logCli(`Space Saved: ${savedSizeStr}`, 'success');
 
         // Update UI to "Done" state
         btnConfirmSlim.textContent = "完成";
         btnConfirmSlim.disabled = false;
-
-        // Remove old listener to prevent re-run, add close listener
-        const newBtn = btnConfirmSlim.cloneNode(true);
-        btnConfirmSlim.parentNode.replaceChild(newBtn, btnConfirmSlim);
-
-        newBtn.addEventListener('click', () => {
+        btnConfirmSlim.onclick = () => {
             slimModal.classList.add('hidden');
-            loadLibrary(libraryPath);
-        });
+            busyPaths.delete(folderPath);
+            refreshSingleGame(folderPath);
+        };
     };
 
 
@@ -1431,9 +1514,11 @@ async function confirmAndCleanGame(folderPath, title) {
 
     document.getElementById('btn-cancel-slim').onclick = () => {
         slimModal.classList.add('hidden');
+        busyPaths.delete(folderPath);
     };
     document.getElementById('btn-close-slim').onclick = () => {
         slimModal.classList.add('hidden');
+        busyPaths.delete(folderPath);
     };
 }
 
@@ -1460,6 +1545,194 @@ document.addEventListener('keydown', (e) => {
         }
     }
 });
+
+const sortSelect = document.getElementById('sort-type');
+if (sortSelect) {
+    sortSelect.value = currentSort;
+    sortSelect.addEventListener('change', (e) => {
+        currentSort = e.target.value;
+        localStorage.setItem('rpg_sort_type', currentSort);
+        renderGameList(libGames);
+    });
+}
+
+// --- UI Popover Logic ---
+const btnFilterPopover = document.getElementById('btn-filter-popover');
+const filterPopover = document.getElementById('filter-popover');
+const btnMoreTools = document.getElementById('btn-more-tools');
+const moreMenu = document.getElementById('more-menu');
+
+if (btnFilterPopover) {
+    btnFilterPopover.addEventListener('click', (e) => {
+        e.stopPropagation();
+        filterPopover.classList.toggle('hidden');
+        moreMenu.classList.add('hidden');
+    });
+}
+
+if (btnMoreTools) {
+    btnMoreTools.addEventListener('click', (e) => {
+        e.stopPropagation();
+        moreMenu.classList.toggle('hidden');
+        filterPopover.classList.add('hidden');
+    });
+}
+
+// Close popovers on external click
+document.addEventListener('click', (e) => {
+    if (filterPopover && !filterPopover.contains(e.target)) {
+        filterPopover.classList.add('hidden');
+    }
+    if (moreMenu && !moreMenu.contains(e.target)) {
+        moreMenu.classList.add('hidden');
+    }
+});
+
+if (btnRescan) {
+    btnRescan.addEventListener('click', () => {
+        if (isScanning) return;
+        if (libraryPath) loadLibrary(libraryPath, false); // Quick Refresh
+    });
+}
+
+const btnDeepScan = document.getElementById('btn-deep-scan');
+if (btnDeepScan) {
+    btnDeepScan.addEventListener('click', () => {
+        if (isScanning) return;
+        if (confirm("深度掃描將重新辨識所有遊戲的標題、圖示與瘦身狀態，處理大型遊戲庫可能需要較長時間。\n\n確定要重新完整掃描嗎？")) {
+            if (libraryPath) loadLibrary(libraryPath, true); // Deep Scan
+        }
+    });
+}
+
+if (btnSlimAll) {
+    btnSlimAll.addEventListener('click', confirmAndSlimAll);
+}
+
+// --- Batch Slim Logic ---
+
+async function confirmAndSlimAll() {
+    if (isScanning) {
+        alert("掃描正在進行中，請等待掃描完成後再執行批次操作。");
+        return;
+    }
+
+    const targets = libGames.filter(g => !g.isSlim);
+    if (targets.length === 0) {
+        alert("目前所有遊戲均已完成瘦身！");
+        return;
+    }
+
+    // Pre-check for Network Drives (Check library root once)
+    const driveType = await getDriveType(libraryPath);
+    const isNetwork = driveType === 4 || libraryPath.startsWith('\\\\');
+
+    let msg = `您即將對 ${targets.length} 個遊戲執行批次瘦身操作。\n\n`;
+    msg += "⚠️ 此操作將移除 redundent NW.js 執行檔與相關檔案。\n";
+
+    if (isNetwork) {
+        msg += "\n🛑 警告：偵測到部份網路磁碟路徑！\n";
+        msg += "在網路磁碟執行瘦身將會【永久刪除】檔案（無法進入資源回收桶）。\n";
+    }
+
+    msg += "\n確定要繼續嗎？";
+
+    if (confirm(msg)) {
+        runBatchSlim(targets, isNetwork);
+    }
+}
+
+async function runBatchSlim(targets, isNetwork) {
+    btnSlimAll.disabled = true;
+    const originalText = btnSlimAll.innerHTML;
+
+    // --- Prepare Modal for Batch Mode ---
+    slimModal.classList.remove('hidden');
+    document.getElementById('slim-title').innerText = "批次瘦身進度";
+    document.querySelector('.slim-stats').classList.add('hidden');
+    document.querySelector('.warning-section').classList.add('hidden');
+    const cli = document.getElementById('slim-cli');
+    const cliContent = document.getElementById('slim-cli-content');
+    cli.classList.remove('hidden');
+    cliContent.innerHTML = ''; // Reset logs
+
+    // Buttons handling
+    const btnCancel = document.getElementById('btn-cancel-slim');
+    const btnConfirm = document.getElementById('btn-confirm-slim');
+    btnConfirm.classList.add('hidden');
+    btnCancel.disabled = true;
+    btnCancel.innerText = "處理中...";
+
+    const log = (msg, isHeader = false) => {
+        const div = document.createElement('div');
+        div.innerText = msg;
+        if (isHeader) {
+            div.style.color = '#228be6';
+            div.style.marginTop = '8px';
+            div.style.fontWeight = 'bold';
+        }
+        cliContent.appendChild(div);
+        cli.scrollTop = cli.scrollHeight;
+    };
+
+    let successCount = 0;
+
+    for (let i = 0; i < targets.length; i++) {
+        const game = targets[i];
+        btnSlimAll.innerText = `正在處理 (${i + 1}/${targets.length})...`;
+        statusText.innerText = `正在執行批次瘦身: ${game.title} (${i + 1}/${targets.length})`;
+        log(`>>> [${i + 1}/${targets.length}] ${game.title}`, true);
+
+        try {
+            // 1. Thorough Analysis
+            const analysis = await identifyJunkItems(game.folderPath, isNetwork);
+            const combinedTargets = [...analysis.filesToRemove, ...analysis.foldersToRemove];
+
+            if (combinedTargets.length > 0) {
+                // 2. Atomic Delete
+                atomicBatchDelete(game.folderPath, combinedTargets, isNetwork, log);
+
+                // 3. Patch plugins.js
+                patchPluginsJs(game.folderPath);
+
+                // 4. Update single card
+                await refreshSingleGame(game.folderPath);
+                successCount++;
+            } else {
+                log(`  跳過 (無殘留項目)`);
+            }
+        } catch (err) {
+            log(`  [錯誤] ${err.message}`);
+            console.error(`Batch slim failed for ${game.title}:`, err);
+        }
+    }
+
+    // --- Finish state ---
+    btnSlimAll.disabled = false;
+    btnSlimAll.innerHTML = originalText;
+    statusText.innerText = `批次瘦身完成！共處理 ${successCount} 個遊戲。`;
+
+    btnCancel.disabled = false;
+    btnCancel.innerText = "完成";
+    btnCancel.classList.remove('btn-secondary');
+    btnCancel.classList.add('btn-primary');
+
+    // Reset modal on close
+    const cleanupModal = () => {
+        slimModal.classList.add('hidden');
+        document.querySelector('.slim-stats').classList.remove('hidden');
+        document.querySelector('.warning-section').classList.remove('hidden');
+        cli.classList.add('hidden');
+        btnConfirm.classList.remove('hidden');
+        btnCancel.innerText = "取消";
+        btnCancel.classList.add('btn-secondary');
+        btnCancel.classList.remove('btn-primary');
+        busyPaths.clear();
+        btnCancel.removeEventListener('click', cleanupModal);
+    };
+    btnCancel.addEventListener('click', cleanupModal);
+}
+
 
 // --- Window Controls (Frameless) ---
 (function initWindowControls() {

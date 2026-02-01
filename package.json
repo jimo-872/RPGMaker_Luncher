@@ -9,7 +9,8 @@
     "min_width": 800,
     "min_height": 600,
     "position": "center",
-    "frame": false
+    "frame": false,
+    "icon": "icon.png"
   },
   "node-remote": "<all_urls>",
   "chromium-args": "--allow-file-access-from-files --disable-features=HlgPqSdrRelative",
